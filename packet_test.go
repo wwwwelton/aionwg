@@ -253,3 +253,28 @@ func TestParseConfig(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestParseConfigRejectsBadEndpointPort(t *testing.T) {
+	for _, port := range []string{"0", "65536", "65537", "-1", "abc"} {
+		conf := strings.Replace(sampleConf, "203.0.113.10:51820", "203.0.113.10:"+port, 1)
+		if _, err := ParseConfig(conf); err == nil {
+			t.Errorf("port %q accepted", port)
+		}
+		if _, err := ResolveEndpoint("203.0.113.10:" + port); err == nil {
+			t.Errorf("ResolveEndpoint accepted port %q", port)
+		}
+	}
+	ep, err := ResolveEndpoint("203.0.113.10:65535")
+	if err != nil || ep.Port() != 65535 {
+		t.Fatalf("max port: %v %v", ep, err)
+	}
+}
+
+// bufio.Scanner stops at 64 KiB lines; the config must fail loudly instead of
+// silently dropping everything after that line (such as later peers).
+func TestParseConfigLongLineIsAnError(t *testing.T) {
+	conf := sampleConf + "#" + strings.Repeat("x", 70000) + "\n[Peer]\nPublicKey = invalid\n"
+	if _, err := ParseConfig(conf); err == nil {
+		t.Fatal("config with a >64 KiB line must be rejected")
+	}
+}

@@ -124,7 +124,9 @@ func ParseConfig(text string) (*WGConf, error) {
 			case "presharedkey":
 				peer.PresharedKey, err = decodeKey(v)
 			case "endpoint":
-				peer.Endpoint = v
+				if _, err = parseEndpointPort(v); err == nil {
+					peer.Endpoint = v
+				}
 			case "allowedips":
 				for _, s := range splitList(v) {
 					var p netip.Prefix
@@ -144,6 +146,11 @@ func ParseConfig(text string) (*WGConf, error) {
 		if err != nil {
 			return nil, fmt.Errorf("linha %d (%s): %v", ln, k, err)
 		}
+	}
+	if err := sc.Err(); err != nil {
+		// bufio.Scanner stops at lines over 64 KiB; without this the rest of
+		// the file (including later peers) would be silently ignored.
+		return nil, fmt.Errorf("linha %d: %v", ln+1, err)
 	}
 	if c.PrivateKey == nil {
 		return nil, fmt.Errorf("PrivateKey ausente em [Interface]")
@@ -190,13 +197,30 @@ func (c *WGConf) Allowed(dst netip.Addr) bool {
 	return false
 }
 
+// parseEndpointPort splits host:port and checks the port is 1-65535.
+// It does not resolve DNS, so it is safe to call while parsing a file.
+func parseEndpointPort(ep string) (int, error) {
+	_, port, err := net.SplitHostPort(ep)
+	if err != nil {
+		return 0, err
+	}
+	pn, err := strconv.Atoi(port)
+	if err != nil {
+		return 0, err
+	}
+	if pn < 1 || pn > 65535 {
+		return 0, fmt.Errorf("porta %d fora de 1-65535", pn)
+	}
+	return pn, nil
+}
+
 // ResolveEndpoint resolves host:port into a UDP address (IPv4 preferred).
 func ResolveEndpoint(ep string) (netip.AddrPort, error) {
-	host, port, err := net.SplitHostPort(ep)
+	host, _, err := net.SplitHostPort(ep)
 	if err != nil {
 		return netip.AddrPort{}, err
 	}
-	pn, err := strconv.Atoi(port)
+	pn, err := parseEndpointPort(ep)
 	if err != nil {
 		return netip.AddrPort{}, err
 	}
