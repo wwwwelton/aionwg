@@ -88,6 +88,10 @@ Modo WFP ([w] liga/desliga, [l] escolhe os apps)
     continua funcionando pela tabela do sistema e a tela avisa.
   * Ligar o WFP sem marcar nenhum app abre a lista, pois sozinho ele não
     tuneliza nada.
+  * Destinos remotos novos dos apps marcados são adicionados automaticamente
+    como /32 ou /128 ao AllowedIPs do perfil ativo (e na cópia correspondente
+    em configs-wireguard-oficial, quando existir com o mesmo peer). Os demais
+    programas continuam fora do túnel.
 
 DPS meter (NotMeter, Shugo.gg, A2Tools…)
   Os meters leem os pacotes do jogo com o Npcap. Com o túnel, esses pacotes

@@ -68,6 +68,8 @@ type EngineOptions struct {
 	NoDNS        bool     // full tunnel: do NOT redirect DNS into the tunnel
 	WFP          bool     // tunnel only WFPApps; replaces the port and full-tunnel modes
 	WFPApps      []string // executables the user picked for WFP mode
+	ConfigPath   string   // imported profile receiving learned WFP destinations
+	ConfigPaths  []string
 }
 
 // Diag are counters for the diagnostics panel.
@@ -136,6 +138,7 @@ type outboundUDPJob struct {
 
 type Engine struct {
 	conf         *WGConf
+	routes       *wfpRoutes
 	endpoints    []netip.AddrPort
 	dev          *device.Device
 	tun          *splitTun
@@ -314,6 +317,7 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 		e.Close()
 		return nil, fmt.Errorf("configurando WireGuard: %w", err)
 	}
+	e.routes = &wfpRoutes{conf: conf, path: opt.ConfigPath, paths: opt.ConfigPaths, apply: e.dev.IpcSet}
 	if err := e.dev.Up(); err != nil {
 		e.Close()
 		return nil, err
@@ -470,7 +474,15 @@ func (e *Engine) capture(pkt []byte, addr *divertAddress) bool {
 	if full && !dnsOrig.IsValid() && class != classSelf && e.conf.Bypass(dst) {
 		return false // LAN, multicast… stays on the local network
 	}
-	if !e.conf.Allowed(dst) {
+	allowed := e.conf.Allowed(dst)
+	if !allowed && e.wfp != nil && e.wfpOn.Load() && class != classNone && class != classSelf && !e.conf.Bypass(dst) && dst.IsGlobalUnicast() {
+		if err := e.routes.ensure(dst); err != nil {
+			e.logf("WFP: não foi possível adicionar destino %s: %v", dst, err)
+			return true
+		}
+		allowed = true
+	}
+	if !allowed {
 		// Force UDP only extends direct secondary duplication to game UDP
 		// destinations excluded by AllowedIPs. The original Windows route
 		// remains untouched. Do not duplicate LAN, DNS or VPN endpoints.
@@ -669,6 +681,9 @@ func (e *Engine) housekeeping() {
 		case <-e.stop:
 			return
 		case <-hk.C:
+			if err := e.routes.flush(); err != nil {
+				e.logf("WFP: gravando destinos no perfil: %v", err)
+			}
 			cur := e.healthSample()
 			if line := formatHealth(cur, prev); line != "" {
 				e.logDisk("%s", line)
@@ -1072,6 +1087,9 @@ func (e *Engine) Close() {
 		e.dev.Close()
 	}
 	e.wg.Wait()
+	if err := e.routes.flush(); err != nil {
+		e.logf("WFP: gravando destinos no perfil: %v", err)
+	}
 	if e.h != 0 {
 		e.h.close()
 	}

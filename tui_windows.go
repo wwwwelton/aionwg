@@ -166,12 +166,18 @@ func connectCmd(name string, s Settings) tea.Cmd {
 		if err != nil {
 			return connectedMsg{err: err}
 		}
+		var mirrorPaths []string
+		if exe, err := os.Executable(); err == nil {
+			mirrorPaths = append(mirrorPaths, filepath.Join(filepath.Dir(exe), "configs-wireguard-oficial", name))
+		}
 		eng, err := StartEngine(conf, EngineOptions{
 			Processes: s.Processes, PingTarget: s.PingTarget, Mirror: s.Mirror,
 			UDPDuplicate: s.UDPDuplicate, UDPCopies: s.UDPCopies, UDPForce: s.UDPForce,
 			UDPNewestOut: s.UDPNewestOut, UDPNewestIn: s.UDPNewestIn,
 			FullTunnel: s.FullTunnel, NoDNS: s.NoDNS,
 			WFP: s.WFP, WFPApps: s.WFPApps,
+			ConfigPath:  filepath.Join(configDir(), name),
+			ConfigPaths: mirrorPaths,
 		}, func(f string, a ...any) {
 			line := fmt.Sprintf(f, a...)
 			diskLog.Printf("%s", line)
