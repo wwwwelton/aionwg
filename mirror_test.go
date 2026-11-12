@@ -25,6 +25,31 @@ func TestReasmOrder(t *testing.T) {
 	}
 }
 
+func TestReasmReplacingPendingSegmentDoesNotInflateLimit(t *testing.T) {
+	var r reasm
+	r.syn(100)
+	r.push(105, []byte("ab"), func([]byte) {})
+	r.push(105, []byte("abcd"), func([]byte) {})
+	if r.pendBytes != 4 {
+		t.Fatalf("pending bytes = %d, want 4", r.pendBytes)
+	}
+	var got []byte
+	r.push(101, []byte("1234"), func(b []byte) { got = append(got, b...) })
+	if string(got) != "1234abcd" || r.pendBytes != 0 {
+		t.Fatalf("stream=%q pending=%d", got, r.pendBytes)
+	}
+}
+
+func TestMirrorSetupAfterCloseDoesNotOpenListener(t *testing.T) {
+	m := newMirror(true, t.Logf)
+	m.Close()
+	f := &mirrorFlow{serverPort: 0, done: make(chan struct{})}
+	m.setup(f)
+	if len(m.listeners) != 0 {
+		t.Fatal("setup recreated a listener after Close")
+	}
+}
+
 // mkTCP builds an IPv4 TCP packet.
 func mkTCP(src, dst string, sport, dport uint16, seq uint32, flags byte, payload []byte) []byte {
 	b := make([]byte, 40+len(payload))

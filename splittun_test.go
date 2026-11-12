@@ -80,3 +80,20 @@ func pub(priv []byte) []byte {
 	out, _ := curve25519.X25519(priv, curve25519.Basepoint)
 	return out
 }
+
+func TestSplitTunCloseEndsEvents(t *testing.T) {
+	tun := newSplitTun(1420)
+	if err := tun.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		select {
+		case _, ok := <-tun.Events():
+			if !ok {
+				return
+			}
+		case <-time.After(time.Second):
+			t.Fatal("event consumer remained blocked after Close")
+		}
+	}
+}

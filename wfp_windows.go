@@ -8,6 +8,7 @@ package main
 // layer, which carries no PID, so this only answers "who owns this local port".
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -21,11 +22,12 @@ const wfpFallbackTTL = 2 * time.Second
 
 // wfpMonitor owns the SOCKET handle and the process tree for one engine.
 type wfpMonitor struct {
-	table *wfpTable
-	h     divertHandle
-	logf  func(string, ...any)
-	stop  chan struct{}
-	wg    sync.WaitGroup
+	table  *wfpTable
+	h      divertHandle
+	logf   func(string, ...any)
+	stop   chan struct{}
+	wg     sync.WaitGroup
+	procMu sync.Mutex
 
 	fbMu    sync.Mutex
 	fbPorts map[portKey]uint8 // ports of selected apps, from the system table
@@ -43,7 +45,7 @@ func startWFPMonitor(table *wfpTable, logf func(string, ...any)) *wfpMonitor {
 	m.refreshProcesses()
 	m.wg.Add(1)
 	go m.processLoop()
-	h, err := divertOpen("true", divertLayerSocket, 0, divertFlagSniff|divertFlagRecvOnly)
+	h, err := divertOpen(fmt.Sprintf("processId != %d", windows.GetCurrentProcessId()), divertLayerSocket, 0, divertFlagSniff|divertFlagRecvOnly)
 	if err != nil {
 		logf("aviso: WFP sem camada SOCKET (%v) — usando a tabela do sistema", err)
 		return m
@@ -92,6 +94,12 @@ func (m *wfpMonitor) eventLoop() {
 		}
 		raw := (*[wdAddrSize]byte)(unsafe.Pointer(&addr))[:]
 		if ev, ok := decodeSocketEvent(raw); ok {
+			m.table.mu.Lock()
+			_, known := m.table.procs[ev.pid]
+			m.table.mu.Unlock()
+			if !known && ev.event != wdEventSocketClose {
+				m.refreshProcesses()
+			}
 			m.table.Apply(ev, time.Now())
 		}
 	}
@@ -112,6 +120,8 @@ func (m *wfpMonitor) processLoop() {
 }
 
 func (m *wfpMonitor) refreshProcesses() {
+	m.procMu.Lock()
+	defer m.procMu.Unlock()
 	if procs := snapshotProcesses(); procs != nil {
 		m.table.SetProcesses(procs)
 	}

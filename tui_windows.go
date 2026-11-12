@@ -138,7 +138,16 @@ func newModel() model {
 	return m
 }
 
+// log shows a UI line and records it in the file log.
 func (m *model) log(f string, a ...any) {
+	diskLog.Printf(f, a...)
+	m.show(f, a...)
+}
+
+// show only puts a line on screen. Engine lines are already in the file log by
+// the time they get here (connectCmd writes them before the lossy screen queue),
+// so logging them again would duplicate them.
+func (m *model) show(f string, a ...any) {
 	m.logs = append(m.logs, time.Now().Format("15:04:05 ")+fmt.Sprintf(f, a...))
 	if len(m.logs) > 200 {
 		m.logs = m.logs[len(m.logs)-200:]
@@ -164,7 +173,9 @@ func connectCmd(name string, s Settings) tea.Cmd {
 			FullTunnel: s.FullTunnel, NoDNS: s.NoDNS,
 			WFP: s.WFP, WFPApps: s.WFPApps,
 		}, func(f string, a ...any) {
-			queueProgramLog(logMsg(fmt.Sprintf(f, a...)))
+			line := fmt.Sprintf(f, a...)
+			diskLog.Printf("%s", line)
+			queueProgramLog(logMsg(line))
 		})
 		return connectedMsg{eng: eng, name: name, err: err}
 	}
@@ -240,7 +251,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case logMsg:
-		m.log("%s", string(msg))
+		m.show("%s", string(msg)) // already in the file log (see connectCmd)
 		return m, nil
 
 	case connectedMsg:
@@ -1090,7 +1101,18 @@ func (m model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// diskLog is nil when the file cannot be opened; fileLog methods accept nil, so
+// callers never check. Logging to disk is diagnostic and must never stop the app.
+var diskLog *fileLog
+
 func runTUI() error {
+	if l, err := openFileLog(filepath.Join(appDir(), "aionwg.log")); err == nil {
+		diskLog = l
+		defer l.Close()
+	}
+	s := loadSettings()
+	diskLog.Printf("==== AionWG iniciado · espelho=%v wfp=%v sistema_inteiro=%v udp_dup=%v",
+		s.Mirror, s.WFP, s.FullTunnel, s.UDPDuplicate)
 	program = tea.NewProgram(newModel(), tea.WithAltScreen())
 	finished := make(chan struct{})
 	go func() {
@@ -1105,5 +1127,6 @@ func runTUI() error {
 	}()
 	_, err := program.Run()
 	close(finished)
+	diskLog.Printf("==== AionWG encerrado")
 	return err
 }

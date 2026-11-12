@@ -38,7 +38,10 @@ func (t *splitTun) Events() <-chan tun.Event { return t.events }
 func (t *splitTun) BatchSize() int           { return 32 }
 
 func (t *splitTun) Close() error {
-	t.once.Do(func() { close(t.closed) })
+	t.once.Do(func() {
+		close(t.closed)
+		close(t.events)
+	})
 	return nil
 }
 

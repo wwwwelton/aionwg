@@ -283,6 +283,7 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 
 	e.owner = newOwnerTracker(opt.Processes)
 	e.mirror = newMirror(opt.Mirror, logf)
+	e.mirror.trace = e.logDisk
 	e.udpDup = newUDPDuplicator[divertAddress](udpDupQueueSize, opt.UDPDuplicate)
 	e.udpDup.setCopies(opt.UDPCopies)
 	e.udpForce.Store(opt.UDPForce)
@@ -658,10 +659,21 @@ func (e *Engine) relayICMPError(pkt []byte, p *pktInfo) {
 func (e *Engine) housekeeping() {
 	tk := time.NewTicker(30 * time.Second)
 	defer tk.Stop()
+	// The health snapshot goes to the file log so a drop can be read afterwards.
+	// It reuses this goroutine so Close() has nothing extra to wait for.
+	hk := time.NewTicker(5 * time.Second)
+	defer hk.Stop()
+	var prev healthSample
 	for {
 		select {
 		case <-e.stop:
 			return
+		case <-hk.C:
+			cur := e.healthSample()
+			if line := formatHealth(cur, prev); line != "" {
+				e.logDisk("%s", line)
+			}
+			prev = cur
 		case <-tk.C:
 			cut := time.Now().Add(-5 * time.Minute)
 			e.natMu.Lock()
@@ -674,6 +686,31 @@ func (e *Engine) housekeeping() {
 		}
 	}
 }
+
+// healthSample reads the numbers the periodic snapshot records.
+func (e *Engine) healthSample() healthSample {
+	s := e.Stats()
+	h := healthSample{
+		HandshakeAgeSec: -1,
+		CapturedPkts:    s.Diag.Captured, InjectedPkts: s.Diag.Injected,
+		InjectErr: s.Diag.InjectErr, NoNAT: s.Diag.InNoNAT, QueueFull: s.Diag.TunDrop,
+		Flows: s.Flows, MirrorOn: s.MirrorOn, MirrorFlows: len(s.MirrorFlows),
+		PingTunnelMs: int(s.PingTunnel.RTT.Milliseconds()), PingLossPct: int(s.PingTunnel.Loss * 100),
+	}
+	if !s.Handshake.IsZero() {
+		h.HandshakeAgeSec = int64(time.Since(s.Handshake).Seconds())
+	}
+	e.meterMu.Lock()
+	if e.meter != nil {
+		h.MeterPackets, h.MeterRingFull = e.meter.written.Load(), e.meter.full.Load()
+	}
+	e.meterMu.Unlock()
+	return h
+}
+
+// logDisk writes a line to the file log only (not the screen). It is for
+// periodic and high-volume diagnostics that would flood the TUI log panel.
+func (e *Engine) logDisk(f string, a ...any) { diskLog.Printf(f, a...) }
 
 // ---------------------------------------------------------------- ping
 
@@ -887,6 +924,7 @@ func (e *Engine) SetMirror(on bool) {
 	if e.closing.Load() {
 		return
 	}
+	e.logDisk("[espelho] ativo=%v", on)
 	e.mirror.SetEnabled(on)
 	if on {
 		e.requestMeter()

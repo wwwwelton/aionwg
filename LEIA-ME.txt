@@ -144,6 +144,15 @@ Painel
     AION 2                  só o jogo
     WireGuard               medido no cabo, com o overhead da criptografia
 
+Log de diagnóstico
+  O arquivo %APPDATA%\AionWG\aionwg.log registra os eventos da TUI e do túnel.
+  A cada 5 segundos registra handshake, ping, fluxos e diferenças dos contadores
+  de captura, reinjeção, perdas e espelho. Também registra duração/falha do setup.
+  Rotação: até 2 MiB por arquivo, mantendo aionwg.log e aionwg.log.1.
+  Se o jogo falhar com [m], guarde os dois arquivos e o horário da falha.
+  Os logs podem conter IPs, portas e nomes de processos; revise antes de compartilhar.
+  O log é diagnóstico: não prova que TLS ou a conexão do jogo foram corrigidos.
+
 Avisos
   * Anti-cheat: alguns anti-cheats não gostam de drivers de captura de pacote
     (WinDivert). Use por sua conta e risco.

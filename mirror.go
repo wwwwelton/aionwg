@@ -74,6 +74,7 @@ func (r *reasm) push(seq uint32, data []byte, emit func([]byte)) {
 	if old, ok := r.pending[seq]; ok && len(old) >= len(data) {
 		return
 	}
+	r.pendBytes -= len(r.pending[seq])
 	r.pending[seq] = append([]byte(nil), data...)
 	r.pendBytes += len(data)
 	if r.pendBytes > maxPending { // gap never filled: skip over it
@@ -135,6 +136,7 @@ func (f *mirrorFlow) send(dir int, b []byte) {
 type mirror struct {
 	enabled   atomic.Bool
 	logf      func(string, ...any)
+	trace     func(string, ...any) // disk-only diagnostics; too chatty for the screen
 	mu        sync.Mutex
 	flows     map[uint16]*mirrorFlow // by game local port
 	setupMu   sync.Mutex
@@ -146,6 +148,7 @@ type mirror struct {
 func newMirror(on bool, logf func(string, ...any)) *mirror {
 	m := &mirror{
 		logf:      logf,
+		trace:     func(string, ...any) {},
 		flows:     map[uint16]*mirrorFlow{},
 		listeners: map[uint16]net.Listener{},
 		stop:      make(chan struct{}),
@@ -228,8 +231,11 @@ func (m *mirror) packet(outbound bool, pkt []byte, p *pktInfo) {
 
 	f.mu.Lock()
 	f.last = time.Now()
-	if syn {
+	if syn && !f.dir[dir].init {
 		f.dir[dir].syn(seq)
+	}
+	if syn {
+		seq++
 	}
 	f.dir[dir].push(seq, payload, func(b []byte) { f.send(dir, b) })
 	if fin {
@@ -266,7 +272,19 @@ func (m *mirror) listener(port uint16) (net.Listener, error) {
 }
 
 func (m *mirror) setup(f *mirrorFlow) {
+	queued := time.Now()
 	m.setupMu.Lock()
+	select {
+	case <-m.stop:
+		m.setupMu.Unlock()
+		return
+	case <-f.done:
+		m.setupMu.Unlock()
+		return
+	default:
+	}
+	waited := time.Since(queued) // time spent behind other flows' setup
+	t0 := time.Now()
 	ln, err := m.listener(f.serverPort)
 	var cli, srv net.Conn
 	if err == nil {
@@ -276,16 +294,21 @@ func (m *mirror) setup(f *mirrorFlow) {
 		srv, err = acceptPeer(ln, cli.LocalAddr().String())
 	}
 	m.setupMu.Unlock()
+	took := time.Since(t0)
 	if err != nil {
 		if cli != nil {
 			cli.Close()
 		}
 		m.logf("espelho: falhou (%v)", err)
+		m.trace("espelho: fluxo %d->%d FALHOU apos %s (esperou %s na fila): %v",
+			f.localPort, f.serverPort, took.Round(time.Millisecond), waited.Round(time.Millisecond), err)
 		f.close()
 		return
 	}
 	f.addr = fmt.Sprintf("%s ⇄ %s", cli.LocalAddr(), srv.LocalAddr())
 	f.ready.Store(true)
+	m.trace("espelho: fluxo %d->%d pronto em %s (esperou %s na fila)",
+		f.localPort, f.serverPort, took.Round(time.Millisecond), waited.Round(time.Millisecond))
 	go discard(cli, dirS2C)
 	go discard(srv, dirC2S)
 	go writer(cli, f.out[dirC2S], f.done)
