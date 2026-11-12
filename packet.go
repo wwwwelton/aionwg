@@ -35,6 +35,11 @@ func parsePacket(b []byte) (p pktInfo, ok bool) {
 	if len(b) < 1 {
 		return p, false
 	}
+	// n is the real packet length (IPv4 total length / IPv6 payload+40).
+	// Every transport check below uses n, never len(b): the capture buffer is
+	// larger than the packet, so a truncated header would otherwise pass here
+	// and later index past pktLen() in fixChecksums/clampMSS/segmentTCP.
+	var n int
 	switch b[0] >> 4 {
 	case 4:
 		if len(b) < 20 {
@@ -44,8 +49,8 @@ func parsePacket(b []byte) (p pktInfo, ok bool) {
 		if ihl < 20 || len(b) < ihl {
 			return p, false
 		}
-		total := int(binary.BigEndian.Uint16(b[2:4]))
-		if total < ihl || total > len(b) {
+		n = int(binary.BigEndian.Uint16(b[2:4]))
+		if n < ihl || n > len(b) {
 			return p, false
 		}
 		fragField := binary.BigEndian.Uint16(b[6:8])
@@ -59,6 +64,10 @@ func parsePacket(b []byte) (p pktInfo, ok bool) {
 		if len(b) < 40 {
 			return p, false
 		}
+		n = 40 + int(binary.BigEndian.Uint16(b[4:6]))
+		if n > len(b) {
+			return p, false
+		}
 		p.v6 = true
 		p.proto = b[6] // extension headers are not followed; unknown -> passthrough
 		p.ipHdr = 40
@@ -70,20 +79,20 @@ func parsePacket(b []byte) (p pktInfo, ok bool) {
 	}
 	switch p.proto {
 	case protoTCP:
-		if p.frag || len(b) < p.l4+20 {
+		if p.frag || n < p.l4+20 {
 			return p, false
 		}
 		p.srcPort = binary.BigEndian.Uint16(b[p.l4:])
 		p.dstPort = binary.BigEndian.Uint16(b[p.l4+2:])
 		p.tcpSYN = b[p.l4+13]&0x02 != 0
 	case protoUDP:
-		if p.frag || len(b) < p.l4+8 {
+		if p.frag || n < p.l4+8 {
 			return p, false
 		}
 		p.srcPort = binary.BigEndian.Uint16(b[p.l4:])
 		p.dstPort = binary.BigEndian.Uint16(b[p.l4+2:])
 	case protoICMP, protoICMPv6:
-		if len(b) < p.l4+8 {
+		if n < p.l4+8 {
 			return p, false
 		}
 	default:
@@ -191,7 +200,7 @@ func clampMSS(b []byte, p *pktInfo, maxMSS uint16) bool {
 	if p.proto != protoTCP || !p.tcpSYN {
 		return false
 	}
-	t := b[p.l4:]
+	t := b[p.l4:pktLen(b, p)]
 	doff := int(t[12]>>4) * 4
 	if doff < 20 || doff > len(t) {
 		return false

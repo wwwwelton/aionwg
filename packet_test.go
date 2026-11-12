@@ -149,6 +149,64 @@ func TestFragmentPassthrough(t *testing.T) {
 	}
 }
 
+// The WinDivert capture buffer is 65535 bytes, far larger than the packet.
+// A header claiming a total length too short for its L4 header must be
+// rejected: otherwise fixChecksums/clampMSS index past pktLen() and panic.
+func TestParseRejectsTruncatedInLargeBuffer(t *testing.T) {
+	buf := make([]byte, 65535)
+
+	v4 := func(proto byte, total int) []byte {
+		b := append([]byte(nil), buf...)
+		b[0] = 0x45
+		binary.BigEndian.PutUint16(b[2:], uint16(total))
+		b[9] = proto
+		return b
+	}
+	v6 := func(proto byte, payload int) []byte {
+		b := append([]byte(nil), buf...)
+		b[0] = 0x60
+		binary.BigEndian.PutUint16(b[4:], uint16(payload))
+		b[6] = proto
+		return b
+	}
+	cases := []struct {
+		name string
+		pkt  []byte
+	}{
+		{"v4 tcp total=ihl", v4(protoTCP, 20)},
+		{"v4 tcp total<l4+20", v4(protoTCP, 39)},
+		{"v4 udp total<l4+8", v4(protoUDP, 27)},
+		{"v4 icmp total<l4+8", v4(protoICMP, 27)},
+		{"v6 tcp payload=0", v6(protoTCP, 0)},
+		{"v6 tcp payload<20", v6(protoTCP, 19)},
+		{"v6 udp payload<8", v6(protoUDP, 7)},
+		{"v6 payload beyond buffer", v6(protoUDP, 65535)},
+	}
+	for _, c := range cases {
+		if _, ok := parsePacket(c.pkt); ok {
+			t.Errorf("%s: truncated packet accepted", c.name)
+		}
+	}
+
+	// Minimal valid packets must still parse inside the large buffer, and the
+	// helpers that trusted the parser must stay within pktLen().
+	good := v4(protoUDP, 28)
+	p, ok := parsePacket(good)
+	if !ok || pktLen(good, &p) != 28 {
+		t.Fatalf("minimal v4 udp rejected: ok=%v", ok)
+	}
+	fixChecksums(good, &p)
+	syn := mkTCPSyn("192.168.1.50", "203.0.113.7", 50123, 443, 1460)
+	big := append(append([]byte(nil), syn...), make([]byte, 65535-len(syn))...)
+	sp, ok := parsePacket(big)
+	if !ok || !clampMSS(big, &sp, 1200) {
+		t.Fatal("MSS clamp must work on a packet inside a larger buffer")
+	}
+	if got := binary.BigEndian.Uint16(big[sp.l4+22:]); got != 1200 {
+		t.Fatalf("MSS = %d, want 1200", got)
+	}
+}
+
 const sampleConf = `
 [Interface]
 # comentário
