@@ -27,6 +27,8 @@ type Settings struct {
 	UDPNewestIn  bool     `json:"udp_newest_in"`  // opt-in LIFO scheduling of primary game UDP inbound
 	NoDNS        bool     `json:"no_dns_tunnel"`  // full tunnel: keep Windows' own DNS
 	FullTunnel   bool     `json:"full_tunnel"`    // tunnel the whole system, not just the game // copy the game's TCP streams to 127.0.0.1 for DPS meters
+	WFP          bool     `json:"wfp"`            // WFP mode: tunnel only WFPApps, ignoring the port and full-tunnel modes
+	WFPApps      []string `json:"wfp_apps"`       // executables picked for WFP mode; kept apart from Processes so toggling WFP never loses either list
 }
 
 // Default AION 2 executable names. Check Task Manager → Details if the

@@ -78,3 +78,35 @@ func TestImportConfigNeverOverwrites(t *testing.T) {
 		t.Fatalf("configs: %v", got)
 	}
 }
+
+// Settings written before WFP existed must load with WFP off and no apps, and
+// the WFP fields must survive a save/load without touching the port-based list.
+func TestSettingsWFPDefaultsAndRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+	if err := os.MkdirAll(appDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"processes":["Aion2.exe","steam.exe","steamwebhelper.exe"],"version":2,"full_tunnel":true}`
+	if err := os.WriteFile(filepath.Join(appDir(), "settings.json"), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := loadSettings()
+	if s.WFP || len(s.WFPApps) != 0 {
+		t.Fatalf("old settings must load with WFP off and no apps: %+v", s)
+	}
+
+	s.WFP, s.WFPApps = true, []string{"Discord.exe", "chrome.exe"}
+	if err := saveSettings(s); err != nil {
+		t.Fatal(err)
+	}
+	got := loadSettings()
+	if !got.WFP || len(got.WFPApps) != 2 || got.WFPApps[0] != "Discord.exe" || got.WFPApps[1] != "chrome.exe" {
+		t.Fatalf("WFP fields lost: %+v", got)
+	}
+	if !got.FullTunnel || len(got.Processes) != 3 {
+		t.Fatalf("enabling WFP must not change the port/system settings: %+v", got)
+	}
+}
