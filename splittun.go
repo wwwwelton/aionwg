@@ -53,11 +53,13 @@ func (t *splitTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 		return 0, os.ErrClosed
 	}
 	sizes[0] = copy(bufs[0][offset:], p)
+	putPktBuf(p)
 	n := 1
 	for n < len(bufs) {
 		select {
 		case p = <-t.in:
 			sizes[n] = copy(bufs[n][offset:], p)
+			putPktBuf(p)
 			n++
 		default:
 			return n, nil
@@ -81,5 +83,6 @@ func (t *splitTun) inject(p []byte) {
 	case t.in <- p:
 	default:
 		t.drops.Add(1)
+		putPktBuf(p)
 	}
 }

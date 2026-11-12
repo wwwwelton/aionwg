@@ -46,6 +46,18 @@ func TestSegmentTCP(t *testing.T) {
 	}
 }
 
+func TestPktPoolCloneAndPutZeroAllocs(t *testing.T) {
+	src := bytes.Repeat([]byte{0x42}, 1400)
+	putPktBuf(clonePktBuf(src)) // warm pool
+	allocs := testing.AllocsPerRun(100, func() {
+		b := clonePktBuf(src)
+		putPktBuf(b)
+	})
+	if allocs != 0 {
+		t.Fatalf("expected 0 allocs/op on pooled packet clone+put, got %v", allocs)
+	}
+}
+
 func TestICMPErrorRewrite(t *testing.T) {
 	// original packet as the remote router saw it (src = tunnel IP)
 	orig := mkTCP("10.77.78.2", "203.0.113.5", 50000, 443, 1, 0x10, bytes.Repeat([]byte{1}, 100))

@@ -6,6 +6,7 @@ package main
 import (
 	"encoding/binary"
 	"net/netip"
+	"sync"
 )
 
 const (
@@ -14,6 +15,36 @@ const (
 	protoUDP    = 17
 	protoICMPv6 = 58
 )
+
+const maxPktBuf = 65535
+
+// pktPool recycles packet buffers across capture, segmentation, latestQueue
+// and splitTun so the per-packet hot path does not allocate on the heap.
+// Storing *[maxPktBuf]byte in sync.Pool is pointer-sized and avoids interface
+// boxing allocations on Put.
+var pktPool = sync.Pool{
+	New: func() any { return new([maxPktBuf]byte) },
+}
+
+func getPktBuf(n int) []byte {
+	if n > maxPktBuf {
+		return make([]byte, n)
+	}
+	return pktPool.Get().(*[maxPktBuf]byte)[:n]
+}
+
+func clonePktBuf(src []byte) []byte {
+	dst := getPktBuf(len(src))
+	copy(dst, src)
+	return dst
+}
+
+func putPktBuf(b []byte) {
+	if cap(b) != maxPktBuf {
+		return
+	}
+	pktPool.Put((*[maxPktBuf]byte)(b[:maxPktBuf]))
+}
 
 // pktInfo describes the parts of an IP packet we care about.
 type pktInfo struct {
@@ -311,7 +342,7 @@ func segmentTCP(b []byte, p *pktInfo, mtu int) [][]byte {
 		if end > len(payload) {
 			end = len(payload)
 		}
-		seg := make([]byte, len(hdr)+end-off)
+		seg := getPktBuf(len(hdr) + end - off)
 		copy(seg, hdr)
 		copy(seg[len(hdr):], payload[off:end])
 		st := seg[p.l4:]

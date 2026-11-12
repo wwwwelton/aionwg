@@ -15,6 +15,7 @@ type latestQueue[T any] struct {
 	items   []T
 	cap     int
 	notify  chan struct{}
+	onDrop  func(T)
 	dropped atomic.Uint64
 	sent    atomic.Uint64
 }
@@ -31,6 +32,9 @@ func (q *latestQueue[T]) offer(value T) {
 	q.mu.Lock()
 	if len(q.items) == q.cap {
 		var zero T
+		if q.onDrop != nil {
+			q.onDrop(q.items[0])
+		}
 		q.items[0] = zero // release memory kept alive by the stale oldest item
 		copy(q.items, q.items[1:])
 		q.items = q.items[:len(q.items)-1]

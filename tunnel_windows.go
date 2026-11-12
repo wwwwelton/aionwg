@@ -285,7 +285,12 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 	e.latestOut.Store(opt.UDPNewestOut)
 	e.latestIn.Store(opt.UDPNewestIn)
 	e.outboundQ = newLatestQueue[outboundUDPJob](128)
+	e.outboundQ.onDrop = func(job outboundUDPJob) {
+		putPktBuf(job.packet)
+		putPktBuf(job.copyUDP)
+	}
 	e.inboundQ = newLatestQueue[[]byte](128)
+	e.inboundQ.onDrop = putPktBuf
 	e.meterOpener = openMeterAdapter
 	e.full.Store(opt.FullTunnel)
 	e.noDNS.Store(opt.NoDNS)
@@ -339,6 +344,10 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 				if len(job.copyUDP) > 0 && e.udpDup != nil {
 					e.udpDup.offer(job.copyUDP, job.copyAddr)
 				}
+				putPktBuf(job.copyUDP)
+			} else {
+				putPktBuf(job.packet)
+				putPktBuf(job.copyUDP)
 			}
 		})
 	}()
@@ -348,6 +357,7 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 			if !e.closing.Load() {
 				e.processInbound(pkt)
 			}
+			putPktBuf(pkt)
 		})
 	}()
 	if opt.Mirror {
@@ -491,8 +501,7 @@ func (e *Engine) capture(pkt []byte, addr *divertAddress) bool {
 			e.meterWrite(pkt[:pktLen(pkt, &p)])
 		}
 	}
-	out := make([]byte, pktLen(pkt, &p))
-	copy(out, pkt)
+	out := clonePktBuf(pkt[:pktLen(pkt, &p)])
 
 	k := natKey(p.proto, p.v6, p.srcPort)
 	e.natMu.Lock()
@@ -519,6 +528,7 @@ func (e *Engine) capture(pkt []byte, addr *divertAddress) bool {
 	fixChecksums(out, &p)
 	pkts := [][]byte{out}
 	if segs := segmentTCP(out, &p, e.conf.MTU); segs != nil {
+		putPktBuf(out)
 		pkts = segs
 		e.cSegmented.Add(1)
 	}
@@ -533,7 +543,7 @@ func (e *Engine) capture(pkt []byte, addr *divertAddress) bool {
 			job := outboundUDPJob{packet: q}
 			if eligibleCopy {
 				// Keep the source buffer alive for the asynchronous worker.
-				job.copyUDP = append([]byte(nil), pkt[:pktLen(pkt, &p)]...)
+				job.copyUDP = clonePktBuf(pkt[:pktLen(pkt, &p)])
 				job.copyAddr = *addr
 			}
 			e.outboundQ.offer(job)
@@ -572,7 +582,7 @@ func (e *Engine) handleInbound(pkt []byte) {
 			game := ne != nil && ne.game && ne.local.Is6() == p.v6
 			e.natMu.Unlock()
 			if game {
-				e.inboundQ.offer(append([]byte(nil), pkt[:pktLen(pkt, &p)]...))
+				e.inboundQ.offer(clonePktBuf(pkt[:pktLen(pkt, &p)]))
 				return
 			}
 		}
