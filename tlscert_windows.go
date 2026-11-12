@@ -3,10 +3,15 @@
 package main
 
 import (
+	"crypto/sha1"
 	"crypto/tls"
+	"encoding/hex"
+	"encoding/pem"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -22,7 +27,15 @@ func ensureCertTrusted() error {
 	if _, err := tls.X509KeyPair(tlscert.Cert, tlscert.Key); err != nil {
 		return err
 	}
-	if exec.Command("certutil", "-store", "Root", certCN).Run() == nil {
+	block, _ := pem.Decode(tlscert.Cert)
+	if block == nil {
+		return errors.New("embedded certificate is not PEM")
+	}
+	sum := sha1.Sum(block.Bytes)
+	thumb := hex.EncodeToString(sum[:])
+	// Match by thumbprint: every build has a new key, so CN alone is not enough.
+	if out, err := exec.Command("certutil", "-store", "Root").Output(); err == nil &&
+		strings.Contains(strings.ReplaceAll(strings.ToLower(string(out)), " ", ""), thumb) {
 		return nil
 	}
 	msg, _ := windows.UTF16PtrFromString("O certificado '" + certCN + "' do AionWG não está instalado como raiz confiável. Instalar agora?")

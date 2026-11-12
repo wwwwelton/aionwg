@@ -16,6 +16,9 @@ try {
     } else {
         throw 'MinGW-w64 gcc or a prebuilt shugo-compat.dll is required.'
     }
+    # Fresh self-signed certificate for every build (see internal/tlscert).
+    go run ./internal/tlscert/gen
+    if ($LASTEXITCODE -ne 0) { throw 'Certificate generation failed.' }
     $oldOS, $oldArch, $oldCGO = $env:GOOS, $env:GOARCH, $env:CGO_ENABLED
     try {
         $env:GOOS = 'windows'; $env:GOARCH = 'amd64'; $env:CGO_ENABLED = '0'
