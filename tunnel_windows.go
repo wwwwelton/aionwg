@@ -61,7 +61,8 @@ type EngineOptions struct {
 	PingTarget   string
 	Mirror       bool
 	UDPDuplicate bool // send game UDP extra copies via Windows direct route
-	UDPCopies    int  // 1..8 extra UDP copies per original
+	UDPCopies    int  // X: copies per original (1:X) or group size (X:X)
+	UDPBatch     bool // X:X ratio
 	UDPForce     bool // also copy game UDP outside AllowedIPs; never DNS/LAN/full tunnel
 	UDPNewestOut bool // opt-in latest-first ordering of primary game UDP sends
 	UDPNewestIn  bool // opt-in latest-first ordering of primary game UDP arrivals
@@ -108,7 +109,8 @@ type Stats struct {
 	PingGame         PingResult // ICMP through the tunnel to the game server
 	MirrorOn         bool
 	UDPDupOn         bool   // worker enabled; active only in split-tunnel mode
-	UDPCopies        int    // extra copies per original
+	UDPCopies        int    // X of the 1:X / X:X ratio
+	UDPBatch         bool   // X:X ratio
 	UDPForce         bool   // duplicate game UDP outside AllowedIPs
 	UDPNewestOut     bool   // latest-first primary game UDP send
 	UDPNewestIn      bool   // latest-first primary game UDP arrival
@@ -147,6 +149,8 @@ type Engine struct {
 	h            divertHandle
 	owner        *ownerTracker
 	mirror       *mirror
+	shugoMu      sync.Mutex
+	shugo        *shugoCompat // Shugo.gg relay view; exists only while [m] is on
 	udpDup       *udpDuplicator[divertAddress]
 	udpForce     atomic.Bool
 	latestOut    atomic.Bool
@@ -283,7 +287,7 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 	e.mirror = newMirror(opt.Mirror, logf)
 	e.mirror.trace = e.logDisk
 	e.udpDup = newUDPDuplicator[divertAddress](udpDupQueueSize, opt.UDPDuplicate)
-	e.udpDup.setCopies(opt.UDPCopies)
+	e.udpDup.setRatio(opt.UDPCopies, opt.UDPBatch)
 	e.udpForce.Store(opt.UDPForce)
 	e.latestOut.Store(opt.UDPNewestOut)
 	e.latestIn.Store(opt.UDPNewestIn)
@@ -364,6 +368,7 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 		})
 	}()
 	if opt.Mirror {
+		e.setShugo(true)
 		e.requestMeter()
 	}
 	logf("túnel ativo · endpoint %s · filtro WinDivert aberto", e.endpoints[0])
@@ -882,6 +887,7 @@ func (e *Engine) Stats() Stats {
 	if e.udpDup != nil {
 		s.UDPDupOn = e.udpDup.enabled.Load()
 		s.UDPCopies = int(e.udpDup.copies.Load())
+		s.UDPBatch = e.udpDup.batch.Load()
 		s.UDPForce = e.udpForce.Load()
 		s.UDPNewestOut = e.latestOut.Load()
 		s.UDPNewestIn = e.latestIn.Load()
@@ -947,8 +953,22 @@ func (e *Engine) SetMirror(on bool) {
 	}
 	e.logDisk("[espelho] ativo=%v", on)
 	e.mirror.SetEnabled(on)
+	e.setShugo(on)
 	if on {
 		e.requestMeter()
+	}
+}
+
+// setShugo makes the mirror act as a relay for Shugo.gg: the compatibility
+// layer exists exactly while [m] is on and is restored when it is turned off.
+func (e *Engine) setShugo(on bool) {
+	e.shugoMu.Lock()
+	defer e.shugoMu.Unlock()
+	if on && e.shugo == nil && !e.closing.Load() {
+		e.shugo = startShugoCompat(e.logDisk)
+	} else if !on && e.shugo != nil {
+		e.shugo.Close()
+		e.shugo = nil
 	}
 }
 
@@ -1015,9 +1035,9 @@ func (e *Engine) SetUDPDuplicate(on bool) {
 	e.udpDup.setEnabled(on)
 }
 
-func (e *Engine) SetUDPCopies(n int) {
+func (e *Engine) SetUDPRatio(n int, batch bool) {
 	if !e.closing.Load() && e.udpDup != nil {
-		e.udpDup.setCopies(n)
+		e.udpDup.setRatio(n, batch)
 	}
 }
 func (e *Engine) SetUDPForce(on bool) {
@@ -1105,6 +1125,7 @@ func (e *Engine) Close() {
 	if e.wfp != nil {
 		e.wfp.Close()
 	}
+	e.setShugo(false)
 	if e.mirror != nil {
 		e.mirror.Close()
 	}

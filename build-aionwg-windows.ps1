@@ -163,7 +163,7 @@ try {
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
     try {
         Copy-Item -LiteralPath $exe -Destination $stage
-        $assetNames = @('WinDivert.dll','WinDivert64.sys','wintun.dll','WinDivert-LICENSE.txt')
+        $assetNames = @('WinDivert.dll','WinDivert64.sys','wintun.dll','WinDivert-LICENSE.txt','shugo-compat.dll')
         $assetFolders = @($AssetsDir, $SourceDir, $dist, $PSScriptRoot)
         if ($AssetsZip) {
             Add-Type -AssemblyName System.IO.Compression
@@ -191,6 +191,7 @@ AionWG - build Windows x64
 Mantenha AionWG.exe, WinDivert.dll e WinDivert64.sys na mesma pasta.
 wintun.dll pode ser necessario para recursos que usam o adaptador Wintun.
 Execute como Administrador para captura WinDivert.
+Com [m] ligado, shugo-compat.dll (ao lado do EXE) faz o Shugo enxergar o relay.
 O pacote NAO contem *.conf, chaves privadas ou configuracoes pessoais.
 Build bem-sucedido nao garante captura/driver/roteamento; teste no Windows.
 '@ | Set-Content -LiteralPath (Join-Path $stage 'LEIA-ME-BUILD.txt') -Encoding UTF8

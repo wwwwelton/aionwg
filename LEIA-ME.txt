@@ -105,8 +105,8 @@ DPS meter (NotMeter, Shugo.gg, A2Tools…)
      Precisa do wintun.dll (driver oficial do WireGuard, assinado):
        1. Baixe wintun-0.14.1.zip em https://www.wintun.net
        2. Copie wintun\bin\amd64\wintun.dll para a pasta do AionWG.exe
-  B) Loopback (127.0.0.1), igual ao ExitLag — funciona sem nada extra se o
-     Npcap foi instalado com "Support loopback traffic".
+  B) Loopback (127.0.0.1). Precisa da captura loopback do Npcap.
+     Alguns meters selecionam interfaces pela conexão do jogo e ignoram cópias.
 
   Passo a passo:
   1. Npcap instalado ("WinPcap API-compatible Mode" e "Support loopback
@@ -118,6 +118,13 @@ DPS meter (NotMeter, Shugo.gg, A2Tools…)
      tente o de loopback.
   4. Entre no jogo ou troque de zona/teleporte para o meter detectar.
   NÃO coloque o meter na lista de processos ([p]) — isso não ajuda.
+
+  Shugo.GG 0.4.28 — relay automático com [m]:
+  - Remova shugogg-companion.exe da lista WFP e ligue [m] (como Administrador).
+    O AionWG carrega shugo-compat.dll SOMENTE no Shugo, e ele passa a enxergar
+    o par loopback do espelho. Desligar [m] ou sair restaura a API original.
+  - Sem EXE separado. Escopo: AION2.exe, TCP porta 13328. Não injeta no AION2.
+  - A DLL fica no Shugo até ele fechar; pode acionar antivírus (opt-in via [m]).
 
 WireGuard oficial ([e])
   O cliente oficial não separa por programa, só por IP. O [e] gera, na pasta

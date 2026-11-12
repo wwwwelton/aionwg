@@ -22,6 +22,7 @@ type Settings struct {
 	Mirror       bool     `json:"mirror"`
 	UDPDuplicate bool     `json:"udp_duplicate"`  // optional direct UDP clone; default OFF
 	UDPCopies    int      `json:"udp_copies"`     // extra copies per game UDP datagram, 1..8
+	UDPBatch     bool     `json:"udp_batch"`      // X:X ratio instead of 1:X
 	UDPForce     bool     `json:"udp_force"`      // duplicate even game UDP outside AllowedIPs, except LAN/DNS
 	UDPNewestOut bool     `json:"udp_newest_out"` // opt-in LIFO scheduling of primary game UDP outbound
 	UDPNewestIn  bool     `json:"udp_newest_in"`  // opt-in LIFO scheduling of primary game UDP inbound

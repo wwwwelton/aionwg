@@ -148,7 +148,7 @@ if (-not $NoPackage) {
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
     try {
         Copy-Item -LiteralPath $exe -Destination $stage
-        $assets = @('WinDivert.dll', 'WinDivert64.sys', 'wintun.dll', 'WinDivert-LICENSE.txt')
+        $assets = @('WinDivert.dll', 'WinDivert64.sys', 'wintun.dll', 'WinDivert-LICENSE.txt', 'shugo-compat.dll')
         if ($AssetsZip) {
             Add-Type -AssemblyName System.IO.Compression
             $archive = [IO.Compression.ZipFile]::OpenRead($AssetsZip)
@@ -185,6 +185,7 @@ AionWG - Windows x64
 Compilado com Go para Windows amd64 (CGO=0).
 Para recursos WinDivert/Wintun, mantenha as DLLs e o driver junto ao EXE.
 Execute com privilgios de administrador quando necessario para captura de rede.
+Com [m] ligado, shugo-compat.dll (ao lado do EXE) faz o Shugo enxergar o relay.
 Este pacote nao inclui arquivos .conf ou chaves privadas.
 '@ | Set-Content -LiteralPath (Join-Path $stage 'LEIA-ME.txt') -Encoding UTF8
         $zipOut = Join-Path $dist 'AionWG-windows-x64.zip'

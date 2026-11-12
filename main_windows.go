@@ -34,10 +34,9 @@ func main() {
 		}
 		return
 	}
-	// Make WinDivert.dll next to the exe loadable regardless of the working dir.
-	if exe, err := os.Executable(); err == nil {
-		dir := exe[:strings.LastIndexAny(exe, `\/`)]
-		windows.SetDllDirectory(dir)
+	if err := prepareRuntime(); err != nil {
+		fmt.Println("erro preparando dependências:", err)
+		os.Exit(1)
 	}
 	if err := runTUI(); err != nil {
 		fmt.Println("erro:", err)

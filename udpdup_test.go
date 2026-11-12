@@ -131,3 +131,35 @@ func TestUDPOnlyGameSplitNonDNSIsDuplicated(t *testing.T) {
 		}
 	}
 }
+
+func TestUDPDupBatchReleasesGroupOnlyWhenFull(t *testing.T) {
+	d := newUDPDuplicator[int](64, true)
+	d.setRatio(3, true)
+	d.offer([]byte("a"), 1)
+	d.offer([]byte("b"), 1)
+	if len(d.queue) != 0 {
+		t.Fatalf("2 of 3 originals released %d copies early", len(d.queue))
+	}
+	d.offer([]byte("c"), 1)
+	if len(d.queue) != 3 {
+		t.Fatalf("3:3 group released %d copies, want 3", len(d.queue))
+	}
+	d.setRatio(2, false) // switching mode drops partial groups, 1:2 copies each original
+	d.offer([]byte("d"), 1)
+	if len(d.pending) != 0 || len(d.queue) != 5 {
+		t.Fatalf("1:2 mode pending=%d queue=%d", len(d.pending), len(d.queue))
+	}
+}
+
+func TestParseUDPRatio(t *testing.T) {
+	for in, want := range map[string]struct {
+		n     int
+		batch bool
+		ok    bool
+	}{"3": {3, false, true}, "3:3": {3, true, true}, " 8 : 8 ": {8, true, true}, "2:3": {}, "0": {}, "9:9": {}, "x": {}} {
+		n, b, ok := parseUDPRatio(in)
+		if n != want.n || b != want.batch || ok != want.ok {
+			t.Errorf("%q => %d,%v,%v want %+v", in, n, b, ok, want)
+		}
+	}
+}

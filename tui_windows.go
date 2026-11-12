@@ -8,7 +8,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"strconv"
+	"sort"
 	"strings"
 	"time"
 
@@ -172,7 +172,7 @@ func connectCmd(name string, s Settings) tea.Cmd {
 		}
 		eng, err := StartEngine(conf, EngineOptions{
 			Processes: s.Processes, PingTarget: s.PingTarget, Mirror: s.Mirror,
-			UDPDuplicate: s.UDPDuplicate, UDPCopies: s.UDPCopies, UDPForce: s.UDPForce,
+			UDPDuplicate: s.UDPDuplicate, UDPCopies: s.UDPCopies, UDPBatch: s.UDPBatch, UDPForce: s.UDPForce,
 			UDPNewestOut: s.UDPNewestOut, UDPNewestIn: s.UDPNewestIn,
 			FullTunnel: s.FullTunnel, NoDNS: s.NoDNS,
 			WFP: s.WFP, WFPApps: s.WFPApps,
@@ -407,14 +407,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.eng.SetUDPDuplicate(m.settings.UDPDuplicate)
 			}
 			if m.settings.UDPDuplicate {
-				m.log("UDP %d:1 LIGADO: original no WireGuard e %d copia(s) direta(s); nao garante ping menor.", normalizeUDPCopies(m.settings.UDPCopies), normalizeUDPCopies(m.settings.UDPCopies))
+				m.log("UDP %s LIGADO: original no WireGuard e copias diretas; nao garante ping menor.", udpRatioLabel(m.settings.UDPCopies, m.settings.UDPBatch))
 			} else {
-				m.log("UDP 1:1 DESLIGADO: sem copias extras")
+				m.log("UDP DESLIGADO: sem copias extras")
 			}
 		case "r":
 			m.mode = modeUDPCopies
-			m.input.SetValue(strconv.Itoa(normalizeUDPCopies(m.settings.UDPCopies)))
-			m.input.Placeholder = "1..8 copias extras por pacote UDP original"
+			m.input.SetValue(udpRatioLabel(m.settings.UDPCopies, m.settings.UDPBatch))
+			m.input.Placeholder = "1:X (so X) ou X:X, X de 1 a 8"
 			m.input.Focus()
 		case "f":
 			m.settings.UDPForce = !m.settings.UDPForce
@@ -533,17 +533,21 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.log("Processos-alvo: %s", strings.Join(procs, ", "))
 		case modeUDPCopies:
-			n, err := strconv.Atoi(v)
-			if err != nil || n < 1 || n > udpCopiesMax {
-				m.log("Numero invalido: use de 1 a %d copias UDP extras por original", udpCopiesMax)
+			n, batch, ok := parseUDPRatio(v)
+			if !ok {
+				m.log("Proporcao invalida: use X (1 para X) ou X:X, com X de 1 a %d", udpCopiesMax)
 				return m, nil
 			}
-			m.settings.UDPCopies = n
+			m.settings.UDPCopies, m.settings.UDPBatch = n, batch
 			_ = saveSettings(m.settings)
 			if m.eng != nil {
-				m.eng.SetUDPCopies(n)
+				m.eng.SetUDPRatio(n, batch)
 			}
-			m.log("UDP configurado como %d:1 (%d copias extras + original; conexao direta)", n, n)
+			if batch {
+				m.log("UDP %s: a cada %d originais, %d copias diretas em rajada", udpRatioLabel(n, true), n, n)
+			} else {
+				m.log("UDP %s: %d copia(s) direta(s) por original", udpRatioLabel(n, false), n)
+			}
 		case modePing:
 			m.settings.PingTarget = v
 			_ = saveSettings(m.settings)
@@ -621,7 +625,10 @@ func fmtPing(p PingResult) string {
 
 var sparkChars = []rune("▁▂▃▄▅▆▇█")
 
-func sparkline(h []float64, width int, color lipgloss.Color) string {
+// sparkline draws h as bars scaled to the window's peak. color picks each
+// bar's color from its value (nil = fixed accent). Zero samples show a dim
+// baseline, or a red "×" when lossMark is set (ping with no reply).
+func sparkline(h []float64, width int, color func(float64) lipgloss.Color, lossMark bool) string {
 	if width <= 0 {
 		return ""
 	}
@@ -634,19 +641,38 @@ func sparkline(h []float64, width int, color lipgloss.Color) string {
 			max = v
 		}
 	}
-	var b strings.Builder
-	for i := 0; i < width-len(h); i++ {
-		b.WriteRune(' ')
-	}
+	out := strings.Repeat(" ", width-len(h))
 	for _, v := range h {
-		if max <= 0 || v <= 0 {
-			b.WriteRune(' ')
-			continue
+		switch {
+		case v <= 0 && lossMark:
+			out += lipgloss.NewStyle().Foreground(cRed).Render("×")
+		case v <= 0 || max <= 0:
+			out += sDim.Render("▁")
+		default:
+			idx := int(v / max * float64(len(sparkChars)-1))
+			out += lipgloss.NewStyle().Foreground(color(v)).Render(string(sparkChars[idx]))
 		}
-		idx := int(v / max * float64(len(sparkChars)-1))
-		b.WriteRune(sparkChars[idx])
 	}
-	return lipgloss.NewStyle().Foreground(color).Render(b.String())
+	return out
+}
+
+func fixedColor(c lipgloss.Color) func(float64) lipgloss.Color {
+	return func(float64) lipgloss.Color { return c }
+}
+
+// histStats summarizes the non-zero samples as "min/med/max" (formatted by f).
+func histStats(h []float64, f func(float64) string) string {
+	var v []float64
+	for _, x := range h {
+		if x > 0 {
+			v = append(v, x)
+		}
+	}
+	if len(v) == 0 {
+		return ""
+	}
+	sort.Float64s(v)
+	return sDim.Render(fmt.Sprintf(" min %s · med %s · máx %s", f(v[0]), f(v[len(v)/2]), f(v[len(v)-1])))
 }
 
 // processSummary groups tunnelled processes by name ("steamwebhelper.exe ×6")
@@ -734,7 +760,7 @@ func udpDupStatus(s Stats) string {
 	if s.FullTunnel {
 		return lipgloss.NewStyle().Foreground(cYellow).Render("pausado: sistema inteiro")
 	}
-	return lipgloss.NewStyle().Foreground(cYellow).Render(fmt.Sprintf("%d:1 · direto %d · perdas %d · erros %d · forcar %v", s.UDPCopies, s.UDPDupSent, s.UDPDupDropped, s.UDPDupErrors, s.UDPForce))
+	return lipgloss.NewStyle().Foreground(cYellow).Render(fmt.Sprintf("%s · direto %d · perdas %d · erros %d · forcar %v", udpRatioLabel(s.UDPCopies, s.UDPBatch), s.UDPDupSent, s.UDPDupDropped, s.UDPDupErrors, s.UDPForce))
 }
 
 func mirrorStatus(s Stats) string {
@@ -835,7 +861,7 @@ func (m model) View() string {
 		if m.settings.UDPDuplicate {
 			du = lipgloss.NewStyle().Foreground(cYellow).Render("ligado (experimental)")
 		}
-		stat = append(stat, row("UDP extra", fmt.Sprintf("%d:1 · forcar %v · %s", normalizeUDPCopies(m.settings.UDPCopies), m.settings.UDPForce, du)))
+		stat = append(stat, row("UDP extra", fmt.Sprintf("%s · forcar %v · %s", udpRatioLabel(m.settings.UDPCopies, m.settings.UDPBatch), m.settings.UDPForce, du)))
 		stat = append(stat, row("Ordem UDP", fmt.Sprintf("saida recente %v · chegada recente %v", m.settings.UDPNewestOut, m.settings.UDPNewestIn)))
 		md := "só jogo  ([s] muda para sistema inteiro)"
 		if m.settings.FullTunnel {
@@ -856,7 +882,8 @@ func (m model) View() string {
 			row("VPN direto", fmtPing(s.PingEndpoint)+sDim.Render("  "+s.PingEndpoint.Target)),
 			row("Túnel", fmtPing(s.PingTunnel)+sDim.Render("  "+s.PingTunnel.Target)),
 			row(gameLbl, fmtPing(s.PingGame)+sDim.Render("  "+s.PingGame.Target)),
-			sLabel.Render(fmt.Sprintf("%-12s", "Histórico"))+sparkline(m.histPing, inner-14, cAccent),
+			sLabel.Render(fmt.Sprintf("%-12s", "Histórico"))+sparkline(m.histPing, inner-14, func(v float64) lipgloss.Color { return pingColor(v) }, true),
+			sLabel.Render(fmt.Sprintf("%-12s", ""))+histStats(m.histPing, func(v float64) string { return fmt.Sprintf("%.0f ms", v) }),
 		)
 	}
 
@@ -882,8 +909,8 @@ func (m model) View() string {
 			row("", sDim.Render(fmt.Sprintf("total ▲ %s  ▼ %s", fmtBytes(s.GameUp), fmtBytes(s.GameDown)))),
 			row("WireGuard", sDim.Render(fmt.Sprintf("▲ %s  ▼ %s  (com overhead · total ▲ %s ▼ %s)",
 				fmtRate(m.wgTxRate), fmtRate(m.wgRxRate), fmtBytes(s.WGTx), fmtBytes(s.WGRx)))),
-			sLabel.Render(fmt.Sprintf("%-12s", "Upload"))+sparkline(m.histUp, inner-14, cUp),
-			sLabel.Render(fmt.Sprintf("%-12s", "Download"))+sparkline(m.histDown, inner-14, cDown),
+			sLabel.Render(fmt.Sprintf("%-12s", "Upload"))+rateChart(m.histUp, inner-14, fixedColor(cUp)),
+			sLabel.Render(fmt.Sprintf("%-12s", "Download"))+rateChart(m.histDown, inner-14, fixedColor(cDown)),
 		)
 	}
 
@@ -994,7 +1021,7 @@ func (m model) View() string {
 	case modePing:
 		parts = append(parts, sBold.Render("IP para ping no túnel: ")+m.input.View())
 	case modeUDPCopies:
-		parts = append(parts, sBold.Render("Copias UDP por original (1..8): ")+m.input.View()+sDim.Render("  [Enter] ok  [Esc] cancelar"))
+		parts = append(parts, sBold.Render("Proporcao UDP (X = 1:X, X:X = rajada; X 1..8): ")+m.input.View()+sDim.Render("  [Enter] ok  [Esc] cancelar"))
 	case modeDelete:
 		parts = append(parts, lipgloss.NewStyle().Foreground(cRed).Bold(true).Render(
 			fmt.Sprintf("Remover %s? [s/y] sim  [qualquer tecla] não", m.configs[m.cursor])))
@@ -1138,4 +1165,15 @@ func runTUI() error {
 	close(finished)
 	diskLog.Printf("==== AionWG encerrado")
 	return err
+}
+
+// rateChart draws a throughput history with its min/med/max summary, shrinking
+// the bars so the line still fits the panel.
+func rateChart(h []float64, width int, color func(float64) lipgloss.Color) string {
+	st := histStats(h, fmtRate)
+	w := width - lipgloss.Width(st)
+	if w < 10 {
+		w, st = width, ""
+	}
+	return sparkline(h, w, color, false) + st
 }

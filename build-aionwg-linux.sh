@@ -102,7 +102,7 @@ fi
 STAGE_DIR="$(mktemp -d)"
 mkdir -p "$STAGE_DIR/AionWG-windows-x64"
 cp dist/AionWG.exe "$STAGE_DIR/AionWG-windows-x64/"
-for f in WinDivert.dll WinDivert64.sys wintun.dll WinDivert-LICENSE.txt; do
+for f in WinDivert.dll WinDivert64.sys wintun.dll WinDivert-LICENSE.txt shugo-compat.dll; do
   out="$STAGE_DIR/AionWG-windows-x64/$f"
   # Prioridade: ZIP explícito -> assets-dir -> fonte/dist/pasta do script
   if [[ -n "$ASSETS_ZIP" ]]; then
@@ -127,6 +127,7 @@ AionWG.exe requer execução no Windows x64.
 Mantenha WinDivert.dll e WinDivert64.sys na mesma pasta do EXE.
 wintun.dll pode ser necessária ao adaptador Wintun, conforme a funcionalidade.
 Execute elevado para utilizar WinDivert.
+Com [m] ligado, shugo-compat.dll (ao lado do EXE) faz o Shugo enxergar o relay.
 Nenhum arquivo .conf/chave privada é incluído no ZIP.
 A build não valida automaticamente captura, roteamento, driver ou anti-cheat.
 README
