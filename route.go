@@ -2,7 +2,10 @@ package main
 
 // Routing decisions for the "sistema inteiro" (full tunnel) mode.
 
-import "net/netip"
+import (
+	"fmt"
+	"net/netip"
+)
 
 var localRanges = func() []netip.Prefix {
 	var out []netip.Prefix
@@ -57,4 +60,23 @@ func (c *WGConf) DNSFor(v6 bool) (netip.Addr, bool) {
 		}
 	}
 	return netip.Addr{}, false
+}
+
+const baseCaptureFilter = "outbound and not loopback and (tcp or udp)"
+
+// captureFilter builds the WinDivert NETWORK filter excluding the VPN
+// endpoints' own UDP packets. In WinDivert's grammar "not" only negates a
+// single field test (TEST0), never a parenthesised compound expression, and a
+// test on an absent header (e.g. udp.DstPort != N on TCP) evaluates to false,
+// so compound negation uses the conditional form "(cond? false: true)".
+func captureFilter(endpoints []netip.AddrPort) string {
+	filter := baseCaptureFilter
+	for _, ep := range endpoints {
+		ipf := "ip.DstAddr"
+		if ep.Addr().Is6() {
+			ipf = "ipv6.DstAddr"
+		}
+		filter += fmt.Sprintf(" and ((udp.DstPort == %d and %s == %s)? false: true)", ep.Port(), ipf, ep.Addr())
+	}
+	return filter
 }

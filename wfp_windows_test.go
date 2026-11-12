@@ -3,6 +3,7 @@
 package main
 
 import (
+	"net/netip"
 	"testing"
 	"unsafe"
 )
@@ -22,5 +23,18 @@ func TestSocketOffsetsMatchDivertAddress(t *testing.T) {
 	// Timestamp(8) then the bit-field word: Layer is byte 8, Event is byte 9.
 	if got := unsafe.Offsetof(a.bits); got != 8 {
 		t.Fatalf("bits offset = %d, decoder reads Layer/Event at 8/9", got)
+	}
+}
+
+func TestCaptureFilterCompilesInWinDivert(t *testing.T) {
+	if err := divertLoad(); err != nil {
+		t.Skipf("WinDivert.dll unavailable: %v", err)
+	}
+	f := captureFilter([]netip.AddrPort{
+		netip.MustParseAddrPort("56.124.121.11:51820"),
+		netip.MustParseAddrPort("[2001:db8::1]:51820"),
+	})
+	if err := divertCheckFilter(f, divertLayerNetwork); err != nil {
+		t.Fatalf("WinDivert rejected captureFilter: %v", err)
 	}
 }

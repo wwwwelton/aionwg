@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/netip"
+	"strings"
 	"testing"
 )
 
@@ -29,5 +30,19 @@ func TestBypass(t *testing.T) {
 	}
 	if d, ok := c.DNSFor(false); !ok || d.String() != "1.1.1.1" {
 		t.Fatal("dns")
+	}
+}
+
+func TestCaptureFilterAvoidsInvalidNotParenthesisSyntax(t *testing.T) {
+	f := captureFilter([]netip.AddrPort{
+		netip.MustParseAddrPort("56.124.121.11:51820"),
+		netip.MustParseAddrPort("[2001:db8::1]:51820"),
+	})
+	if strings.Contains(f, "not (") {
+		t.Fatalf("WinDivert grammar rejects 'not (...)': %s", f)
+	}
+	want := "outbound and not loopback and (tcp or udp) and ((udp.DstPort == 51820 and ip.DstAddr == 56.124.121.11)? false: true) and ((udp.DstPort == 51820 and ipv6.DstAddr == 2001:db8::1)? false: true)"
+	if f != want {
+		t.Fatalf("got %q, want %q", f, want)
 	}
 }

@@ -262,19 +262,11 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 
 	// The VPN server's own UDP packets are excluded from capture (only a
 	// speed-up: they come from our own process and would pass through anyway).
-	base := "outbound and not loopback and (tcp or udp)"
-	filter := base
-	for _, ep := range e.endpoints {
-		ipf := "ip.DstAddr"
-		if ep.Addr().Is6() {
-			ipf = "ipv6.DstAddr"
-		}
-		filter += fmt.Sprintf(" and not (udp.DstPort == %d and %s == %s)", ep.Port(), ipf, ep.Addr())
-	}
+	filter := captureFilter(e.endpoints)
 	h, err := divertOpen(filter, divertLayerNetwork, 0, 0)
-	if err != nil && filter != base {
+	if err != nil && filter != baseCaptureFilter {
 		logf("aviso: %v — usando filtro simples", err)
-		h, err = divertOpen(base, divertLayerNetwork, 0, 0)
+		h, err = divertOpen(baseCaptureFilter, divertLayerNetwork, 0, 0)
 	}
 	if err != nil {
 		return nil, err
