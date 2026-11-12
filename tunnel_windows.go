@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -91,6 +92,7 @@ type PingResult struct {
 	RTT    time.Duration // 0 = no reply
 	OK     bool
 	Loss   float64 // 0..1 over the last 20 probes
+	Err    uint32  // Windows IP_STATUS / GetLastError of the last failed direct ICMP (0 = none)
 }
 
 type Stats struct {
@@ -191,11 +193,12 @@ type pingState struct {
 	target  netip.Addr
 	last    time.Duration
 	ok      bool
+	err     uint32
 	history []bool
 }
 
 func (s *pingState) result() PingResult {
-	r := PingResult{RTT: s.last, OK: s.ok}
+	r := PingResult{RTT: s.last, OK: s.ok, Err: s.err}
 	if s.target.IsValid() {
 		r.Target = s.target.String()
 	}
@@ -764,9 +767,10 @@ func (e *Engine) pingLoop() {
 		// 1) direct to the VPN server (outside the tunnel)
 		if icmp != nil && e.endpoints[0].Addr().Is4() {
 			go func(t netip.Addr) {
-				rtt, ok := icmp.ping(t, 900*time.Millisecond)
+				rtt, code := icmp.ping(t, 900*time.Millisecond)
 				e.pingMu.Lock()
-				e.pings[0].record(ok, rtt)
+				e.pings[0].err = code
+				e.pings[0].record(code == 0, rtt)
 				e.pingMu.Unlock()
 			}(e.endpoints[0].Addr())
 		}
@@ -1136,27 +1140,32 @@ func newIcmpPinger() (*icmpPinger, error) {
 
 func (p *icmpPinger) close() { procIcmpCloseHandle.Call(p.h) }
 
-func (p *icmpPinger) ping(dst netip.Addr, timeout time.Duration) (time.Duration, bool) {
+// ping returns the RTT and 0 on success; otherwise a Windows error code
+// (ICMP_ECHO_REPLY.Status such as 11010 timeout / 11003 host unreachable, or GetLastError).
+func (p *icmpPinger) ping(dst netip.Addr, timeout time.Duration) (time.Duration, uint32) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	a := dst.As4()
 	ip := *(*uint32)(unsafe.Pointer(&a[0])) // IPAddr is in network order in memory
 	data := []byte("aionwg")
 	reply := make([]byte, 28+len(data)+8+64)
-	r, _, _ := procIcmpSendEcho.Call(p.h, uintptr(ip), uintptr(unsafe.Pointer(&data[0])), uintptr(len(data)),
+	r, _, errno := procIcmpSendEcho.Call(p.h, uintptr(ip), uintptr(unsafe.Pointer(&data[0])), uintptr(len(data)),
 		0, uintptr(unsafe.Pointer(&reply[0])), uintptr(len(reply)), uintptr(timeout.Milliseconds()))
 	if r == 0 {
-		return 0, false
+		if en, ok := errno.(syscall.Errno); ok && en != 0 {
+			return 0, uint32(en)
+		}
+		return 0, 1
 	}
 	// ICMP_ECHO_REPLY: Address(4) Status(4) RoundTripTime(4) ...
 	status := *(*uint32)(unsafe.Pointer(&reply[4]))
 	rtt := *(*uint32)(unsafe.Pointer(&reply[8]))
 	if status != 0 {
-		return 0, false
+		return 0, status
 	}
 	d := time.Duration(rtt) * time.Millisecond
 	if d == 0 {
 		d = 500 * time.Microsecond
 	}
-	return d, true
+	return d, 0
 }

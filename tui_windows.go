@@ -603,6 +603,9 @@ func fmtPing(p PingResult) string {
 		return sDim.Render("—")
 	}
 	if !p.OK && p.RTT == 0 {
+		if p.Err != 0 {
+			return sDim.Render(fmt.Sprintf("sem resposta (erro %d)", p.Err))
+		}
 		return sDim.Render("sem resposta")
 	}
 	ms := float64(p.RTT.Microseconds()) / 1000
