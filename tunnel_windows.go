@@ -416,8 +416,8 @@ func (e *Engine) classify(proto uint8, port uint16) (class uint8, full bool) {
 		func() uint8 { return e.owner.Class(proto, port) },
 		e.full.Load(),
 		func() uint8 {
-			return e.wfp.table.Decide(proto, port, time.Now(), func() bool {
-				return e.wfp.systemOwns(proto, port)
+			return e.wfp.table.Decide(proto, port, time.Now(), func() uint8 {
+				return e.wfp.systemClass(proto, port)
 			})
 		})
 }

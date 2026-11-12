@@ -46,7 +46,7 @@ type wfpTable struct {
 	ports  map[portKey]wfpPort
 	apps   map[string]struct{} // lower-case exe names the user picked
 	procs  map[uint32]wfpProc  // live process tree, refreshed by the caller
-	tunnel map[uint32]bool     // memoised: pid -> goes through the tunnel
+	tunnel map[uint32]uint8    // memoised: pid -> class of its selected app (classNone = not tunnelled)
 }
 
 type wfpPort struct {
@@ -68,7 +68,7 @@ func newWFPTable() *wfpTable {
 		ports:  map[portKey]wfpPort{},
 		apps:   map[string]struct{}{},
 		procs:  map[uint32]wfpProc{},
-		tunnel: map[uint32]bool{},
+		tunnel: map[uint32]uint8{},
 	}
 }
 
@@ -82,7 +82,7 @@ func (t *wfpTable) SetApps(names []string) {
 	}
 	t.mu.Lock()
 	t.apps = m
-	t.tunnel = map[uint32]bool{}
+	t.tunnel = map[uint32]uint8{}
 	t.mu.Unlock()
 }
 
@@ -90,7 +90,7 @@ func (t *wfpTable) SetApps(names []string) {
 func (t *wfpTable) SetProcesses(procs map[uint32]wfpProc) {
 	t.mu.Lock()
 	t.procs = procs
-	t.tunnel = map[uint32]bool{}
+	t.tunnel = map[uint32]uint8{}
 	t.mu.Unlock()
 }
 
@@ -132,29 +132,43 @@ func (t *wfpTable) Owner(proto uint8, port uint16, now time.Time) (uint32, bool)
 func (t *wfpTable) Selected(pid uint32) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.selectedLocked(pid, 0)
+	return t.classLocked(pid, 0) != classNone
 }
 
 // wfpMaxDepth bounds the parent walk: Windows PIDs are reused, so a stale ppid
 // can form a cycle.
 const wfpMaxDepth = 32
 
-func (t *wfpTable) selectedLocked(pid uint32, depth int) bool {
+// wfpClassOfApp is the class a selected app gets. Only the game itself keeps
+// the game treatment (DPS mirror, extra UDP, latest-first ordering, game ping);
+// any other app is tunnelled without it, since those options were built for
+// the game and can degrade apps such as voice chat or a browser.
+func wfpClassOfApp(lowerName string) uint8 {
+	if strings.HasPrefix(lowerName, "aion2") {
+		return classGame
+	}
+	return classApp
+}
+
+// classLocked returns the class of the selected app pid belongs to: the app
+// itself, or the nearest selected ancestor (so a child of the game inherits the
+// game's class whatever its own name is). classNone means not tunnelled.
+func (t *wfpTable) classLocked(pid uint32, depth int) uint8 {
 	if v, ok := t.tunnel[pid]; ok {
 		return v
 	}
 	if depth > wfpMaxDepth {
-		return false
+		return classNone
 	}
 	p, ok := t.procs[pid]
 	if !ok {
-		return false
+		return classNone
 	}
-	v := false
+	v := classNone
 	if _, hit := t.apps[p.name]; hit {
-		v = true
+		v = wfpClassOfApp(p.name)
 	} else if p.ppid != 0 && p.ppid != pid {
-		v = t.selectedLocked(p.ppid, depth+1)
+		v = t.classLocked(p.ppid, depth+1)
 	}
 	t.tunnel[pid] = v
 	return v
@@ -168,10 +182,9 @@ func (t *wfpTable) Class(proto uint8, port uint16, now time.Time) (class uint8, 
 	if !found {
 		return classNone, false
 	}
-	if t.Selected(pid) {
-		return classGame, true
-	}
-	return classNone, true
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.classLocked(pid, 0), true
 }
 
 // WinDivert SOCKET layer events (windivert.h). Only the ones that name the
@@ -232,29 +245,30 @@ func (t *wfpTable) Apply(ev wfpEvent, now time.Time) {
 
 // Decide returns the owner class for a local port in WFP mode. The SOCKET
 // layer cannot see sockets opened before its handle, so when it has no record
-// the system table is asked instead (fallback). fallback reports whether the
-// port belongs to a selected app, so WFP mode never captures less than the
-// default mode would for the same apps, and never captures anything that is
-// not selected.
-func (t *wfpTable) Decide(proto uint8, port uint16, now time.Time, fallback func() bool) uint8 {
+// the system table is asked instead (fallback). fallback returns the class of
+// the selected app that owns the port (classNone if none does), so WFP mode
+// never captures less than the default mode would for the same apps, never
+// captures anything that is not selected, and gives a socket the same class
+// whether the SOCKET layer or the system table identified it.
+func (t *wfpTable) Decide(proto uint8, port uint16, now time.Time, fallback func() uint8) uint8 {
 	if class, known := t.Class(proto, port, now); known {
 		return class
 	}
-	if fallback != nil && fallback() {
-		return classGame
+	if fallback != nil {
+		return fallback()
 	}
 	return classNone
 }
 
-// SelectedPIDs returns the live PIDs of selected apps and their descendants, in
-// the shape dumpOwnedPorts expects.
+// SelectedPIDs returns the live PIDs of selected apps and their descendants
+// with the class each one gets, in the shape dumpOwnedPorts expects.
 func (t *wfpTable) SelectedPIDs() map[uint32]uint8 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	out := map[uint32]uint8{}
 	for pid := range t.procs {
-		if t.selectedLocked(pid, 0) {
-			out[pid] = classGame
+		if c := t.classLocked(pid, 0); c != classNone {
+			out[pid] = c
 		}
 	}
 	return out
@@ -267,7 +281,7 @@ func (t *wfpTable) SelectedProcs() []ProcInfo {
 	defer t.mu.Unlock()
 	var out []ProcInfo
 	for pid, p := range t.procs {
-		if t.selectedLocked(pid, 0) {
+		if t.classLocked(pid, 0) != classNone {
 			out = append(out, ProcInfo{PID: pid, Name: p.name})
 		}
 	}

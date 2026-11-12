@@ -54,19 +54,18 @@ func startWFPMonitor(table *wfpTable, logf func(string, ...any)) *wfpMonitor {
 	return m
 }
 
-// systemOwns reports whether the system TCP/UDP table says a selected app owns
-// the port. It serves sockets the SOCKET layer never saw (opened before its
-// handle). One dump answers every port for wfpFallbackTTL, so a burst of
-// packets does not dump the table per packet.
-func (m *wfpMonitor) systemOwns(proto uint8, port uint16) bool {
+// systemClass returns the class of the selected app that the system TCP/UDP
+// table says owns the port (classNone if none). It serves sockets the SOCKET
+// layer never saw (opened before its handle). One dump answers every port for
+// wfpFallbackTTL, so a burst of packets does not dump the table per packet.
+func (m *wfpMonitor) systemClass(proto uint8, port uint16) uint8 {
 	m.fbMu.Lock()
 	defer m.fbMu.Unlock()
 	if m.fbPorts == nil || time.Since(m.fbAt) > wfpFallbackTTL {
 		m.fbPorts, _ = dumpOwnedPorts(m.table.SelectedPIDs())
 		m.fbAt = time.Now()
 	}
-	_, ok := m.fbPorts[portKey{proto, port}]
-	return ok
+	return m.fbPorts[portKey{proto, port}] // zero value is classNone
 }
 
 // invalidateFallback drops the cached system-table answer, so a changed app

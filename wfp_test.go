@@ -9,14 +9,16 @@ var t0 = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 func newTestTable() *wfpTable {
 	t := newWFPTable()
-	t.SetApps([]string{"Game.exe"})
+	t.SetApps([]string{"Aion2.exe", "Discord.exe"})
 	t.SetProcesses(map[uint32]wfpProc{
-		10: {name: "game.exe", ppid: 1},
-		11: {name: "browser.exe", ppid: 10}, // child of the game
+		10: {name: "aion2.exe", ppid: 1},    // the game
+		11: {name: "browser.exe", ppid: 10}, // child of the game (in-game shop)
 		12: {name: "helper.exe", ppid: 11},  // grandchild
 		20: {name: "other.exe", ppid: 1},    // unrelated
 		30: {name: "loop-a.exe", ppid: 31},  // PID reuse can create cycles
 		31: {name: "loop-b.exe", ppid: 30},
+		40: {name: "discord.exe", ppid: 1},  // a selected app that is not the game
+		41: {name: "updater.exe", ppid: 40}, // its child
 	})
 	return t
 }
@@ -27,6 +29,8 @@ func TestWFPClassFollowsSelectedAppsAndChildren(t *testing.T) {
 	tb.Bind(protoTCP, 5001, 11, t0)
 	tb.Bind(protoUDP, 5002, 12, t0)
 	tb.Bind(protoTCP, 5003, 20, t0)
+	tb.Bind(protoTCP, 5004, 40, t0)
+	tb.Bind(protoUDP, 5005, 41, t0)
 
 	for _, c := range []struct {
 		proto uint8
@@ -34,10 +38,12 @@ func TestWFPClassFollowsSelectedAppsAndChildren(t *testing.T) {
 		want  uint8
 		known bool
 	}{
-		{protoTCP, 5000, classGame, true},  // selected app (name compare is case-insensitive)
-		{protoTCP, 5001, classGame, true},  // child follows
-		{protoUDP, 5002, classGame, true},  // grandchild follows
+		{protoTCP, 5000, classGame, true},  // the game (selection compares case-insensitively)
+		{protoTCP, 5001, classGame, true},  // its child inherits the game class
+		{protoUDP, 5002, classGame, true},  // and so does a grandchild
 		{protoTCP, 5003, classNone, true},  // known, not selected
+		{protoTCP, 5004, classApp, true},   // selected app that is not the game: tunnel only
+		{protoUDP, 5005, classApp, true},   // its child follows, still without game treatment
 		{protoTCP, 9999, classNone, false}, // unknown: caller must fall back
 		{protoUDP, 5000, classNone, false}, // TCP and UDP ports are distinct keys
 	} {
@@ -86,20 +92,46 @@ func TestWFPEntriesExpire(t *testing.T) {
 	}
 }
 
-// Changing the selection must take effect without a reconnect.
+// Changing the selection must take effect without a reconnect, and the class a
+// process gets must follow what is selected: only the game keeps the game
+// treatment, any other selected app is tunnel-only.
 func TestWFPSetAppsInvalidatesDecision(t *testing.T) {
 	tb := newTestTable()
-	tb.Bind(protoTCP, 8000, 20, t0)
+	tb.Bind(protoTCP, 8000, 20, t0) // other.exe
 	if c, _ := tb.Class(protoTCP, 8000, t0); c != classNone {
 		t.Fatal("other.exe is not selected yet")
 	}
 	tb.SetApps([]string{"other.exe"})
-	if c, _ := tb.Class(protoTCP, 8000, t0); c != classGame {
-		t.Fatal("selection change was not applied")
+	if c, _ := tb.Class(protoTCP, 8000, t0); c != classApp {
+		t.Fatalf("a selected app that is not the game must be tunnel-only, got %d", c)
+	}
+	tb.SetApps([]string{"aion2.exe"})
+	if c, _ := tb.Class(protoTCP, 8000, t0); c != classNone {
+		t.Fatal("deselected app must leave the tunnel")
+	}
+	tb.Bind(protoTCP, 8001, 10, t0) // aion2.exe
+	if c, _ := tb.Class(protoTCP, 8001, t0); c != classGame {
+		t.Fatalf("the game must keep the game class, got %d", c)
 	}
 	tb.SetApps(nil)
-	if c, _ := tb.Class(protoTCP, 8000, t0); c != classNone {
+	if c, _ := tb.Class(protoTCP, 8001, t0); c != classNone {
 		t.Fatal("empty selection must tunnel nothing")
+	}
+}
+
+// Anything that starts with "aion2" is the game (Aion2.exe and
+// Aion2-Win64-Shipping.exe); look-alikes and other apps are not.
+func TestWFPClassOfApp(t *testing.T) {
+	for name, want := range map[string]uint8{
+		"aion2.exe":                classGame,
+		"aion2-win64-shipping.exe": classGame,
+		"discord.exe":              classApp,
+		"steam.exe":                classApp,
+		"notaion2.exe":             classApp,
+	} {
+		if got := wfpClassOfApp(name); got != want {
+			t.Errorf("%s: class %d, want %d", name, got, want)
+		}
 	}
 }
 
@@ -165,37 +197,40 @@ func TestWFPApplyBindThenClose(t *testing.T) {
 func TestWFPDecideUsesFallbackOnlyWhenSocketLayerHasNoRecord(t *testing.T) {
 	tb := newTestTable()
 	calls := 0
-	yes := func() bool { calls++; return true }
-	no := func() bool { calls++; return false }
+	answer := func(c uint8) func() uint8 { return func() uint8 { calls++; return c } }
 
 	// Known to the SOCKET layer: the fallback must not be asked, and a known
 	// non-selected owner must not be overridden by the system table.
-	tb.Bind(protoTCP, 9000, 20, t0)
-	if got := tb.Decide(protoTCP, 9000, t0, yes); got != classNone || calls != 0 {
+	tb.Bind(protoTCP, 9000, 20, t0) // other.exe, not selected
+	if got := tb.Decide(protoTCP, 9000, t0, answer(classGame)); got != classNone || calls != 0 {
 		t.Fatalf("known owner overridden: class=%d calls=%d", got, calls)
 	}
-	tb.Bind(protoTCP, 9001, 10, t0)
-	if got := tb.Decide(protoTCP, 9001, t0, no); got != classGame || calls != 0 {
+	tb.Bind(protoTCP, 9001, 10, t0) // Aion2.exe
+	if got := tb.Decide(protoTCP, 9001, t0, answer(classNone)); got != classGame || calls != 0 {
 		t.Fatalf("known selected owner lost: class=%d calls=%d", got, calls)
 	}
 
-	// Unknown (socket opened before the handle): the system table decides.
-	if got := tb.Decide(protoTCP, 9100, t0, yes); got != classGame {
-		t.Fatalf("fallback hit ignored: %d", got)
-	}
-	if got := tb.Decide(protoTCP, 9100, t0, no); got != classNone {
-		t.Fatalf("fallback miss captured: %d", got)
+	// Unknown (socket opened before the handle): the system table decides, and
+	// its class is used as is, so the same app is classified the same way
+	// whichever source identified the socket.
+	for _, c := range []uint8{classGame, classApp, classNone} {
+		if got := tb.Decide(protoTCP, 9100, t0, answer(c)); got != c {
+			t.Fatalf("fallback class %d not honoured: got %d", c, got)
+		}
 	}
 	if got := tb.Decide(protoTCP, 9100, t0, nil); got != classNone {
 		t.Fatalf("nil fallback must capture nothing: %d", got)
 	}
 }
 
-func TestWFPSelectedPIDsListsAppsAndDescendantsOnly(t *testing.T) {
+func TestWFPSelectedPIDsListsAppsAndDescendantsWithTheirClass(t *testing.T) {
 	got := newTestTable().SelectedPIDs()
-	for _, pid := range []uint32{10, 11, 12} {
-		if got[pid] != classGame {
-			t.Errorf("pid %d must be selected", pid)
+	for pid, want := range map[uint32]uint8{
+		10: classGame, 11: classGame, 12: classGame, // Aion2.exe and its descendants
+		40: classApp, 41: classApp, // Discord.exe and its child: tunnelled, no game treatment
+	} {
+		if got[pid] != want {
+			t.Errorf("pid %d: class %d, want %d", pid, got[pid], want)
 		}
 	}
 	for _, pid := range []uint32{1, 20, 30, 31} {
