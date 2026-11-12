@@ -21,8 +21,8 @@ type Settings struct {
 	Version      int      `json:"version"`
 	Mirror       bool     `json:"mirror"`
 	UDPDuplicate bool     `json:"udp_duplicate"`  // optional direct UDP clone; default OFF
-	UDPCopies    int      `json:"udp_copies"`     // extra copies per game UDP datagram, 1..8
-	UDPBatch     bool     `json:"udp_batch"`      // X:X ratio instead of 1:X
+	UDPOriginals int      `json:"udp_originals"`  // A of A:B: every A originals release UDPCopies copies, 1..8
+	UDPCopies    int      `json:"udp_copies"`     // B of A:B: copies per group, 1..8
 	UDPForce     bool     `json:"udp_force"`      // duplicate even game UDP outside AllowedIPs, except LAN/DNS
 	UDPNewestOut bool     `json:"udp_newest_out"` // opt-in LIFO scheduling of primary game UDP outbound
 	UDPNewestIn  bool     `json:"udp_newest_in"`  // opt-in LIFO scheduling of primary game UDP inbound
@@ -45,7 +45,7 @@ var defaultProcesses = []string{
 // steamProcesses are added to existing lists by the v2 settings migration.
 var steamProcesses = []string{"steam.exe", "steamwebhelper.exe"}
 
-const settingsVersion = 2
+const settingsVersion = 3
 
 func hasProcess(list []string, name string) bool {
 	for _, p := range list {
@@ -76,6 +76,15 @@ func loadSettings() Settings {
 		s.Processes = defaultProcesses
 	}
 	s.UDPCopies = normalizeUDPCopies(s.UDPCopies)
+	s.UDPOriginals = normalizeUDPCopies(s.UDPOriginals)
+	if s.Version < 3 { // v3: A:B ratio replaces the udp_batch flag (X:X = A=B=X)
+		var old struct {
+			UDPBatch bool `json:"udp_batch"`
+		}
+		if err == nil && json.Unmarshal(b, &old) == nil && old.UDPBatch {
+			s.UDPOriginals = s.UDPCopies
+		}
+	}
 	if s.Version < 2 { // v2: Steam joins the tunnel
 		for _, p := range steamProcesses {
 			if !hasProcess(s.Processes, p) {
@@ -96,6 +105,7 @@ func saveSettings(s Settings) error {
 	}
 	s.Version = settingsVersion
 	s.UDPCopies = normalizeUDPCopies(s.UDPCopies)
+	s.UDPOriginals = normalizeUDPCopies(s.UDPOriginals)
 	b, _ := json.MarshalIndent(s, "", "  ")
 	return os.WriteFile(filepath.Join(appDir(), "settings.json"), b, 0o600)
 }

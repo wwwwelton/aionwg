@@ -172,7 +172,7 @@ func connectCmd(name string, s Settings) tea.Cmd {
 		}
 		eng, err := StartEngine(conf, EngineOptions{
 			Processes: s.Processes, PingTarget: s.PingTarget, Mirror: s.Mirror,
-			UDPDuplicate: s.UDPDuplicate, UDPCopies: s.UDPCopies, UDPBatch: s.UDPBatch, UDPForce: s.UDPForce,
+			UDPDuplicate: s.UDPDuplicate, UDPOriginals: s.UDPOriginals, UDPCopies: s.UDPCopies, UDPForce: s.UDPForce,
 			UDPNewestOut: s.UDPNewestOut, UDPNewestIn: s.UDPNewestIn,
 			FullTunnel: s.FullTunnel, NoDNS: s.NoDNS,
 			WFP: s.WFP, WFPApps: s.WFPApps,
@@ -407,14 +407,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.eng.SetUDPDuplicate(m.settings.UDPDuplicate)
 			}
 			if m.settings.UDPDuplicate {
-				m.log("UDP %s LIGADO: original no WireGuard e copias diretas; nao garante ping menor.", udpRatioLabel(m.settings.UDPCopies, m.settings.UDPBatch))
+				m.log("UDP %s LIGADO: original no WireGuard e copias diretas; nao garante ping menor.", udpRatioLabel(m.settings.UDPOriginals, m.settings.UDPCopies))
 			} else {
 				m.log("UDP DESLIGADO: sem copias extras")
 			}
 		case "r":
 			m.mode = modeUDPCopies
-			m.input.SetValue(udpRatioLabel(m.settings.UDPCopies, m.settings.UDPBatch))
-			m.input.Placeholder = "1:X (so X) ou X:X, X de 1 a 8"
+			m.input.SetValue(udpRatioLabel(m.settings.UDPOriginals, m.settings.UDPCopies))
+			m.input.Placeholder = "B (1:B) ou A:B, A e B de 1 a 8"
 			m.input.Focus()
 		case "f":
 			m.settings.UDPForce = !m.settings.UDPForce
@@ -533,21 +533,17 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.log("Processos-alvo: %s", strings.Join(procs, ", "))
 		case modeUDPCopies:
-			n, batch, ok := parseUDPRatio(v)
+			a, b, ok := parseUDPRatio(v)
 			if !ok {
-				m.log("Proporcao invalida: use X (1 para X) ou X:X, com X de 1 a %d", udpCopiesMax)
+				m.log("Proporcao invalida: use B (1:B) ou A:B, com A e B de 1 a %d", udpCopiesMax)
 				return m, nil
 			}
-			m.settings.UDPCopies, m.settings.UDPBatch = n, batch
+			m.settings.UDPOriginals, m.settings.UDPCopies = a, b
 			_ = saveSettings(m.settings)
 			if m.eng != nil {
-				m.eng.SetUDPRatio(n, batch)
+				m.eng.SetUDPRatio(a, b)
 			}
-			if batch {
-				m.log("UDP %s: a cada %d originais, %d copias diretas em rajada", udpRatioLabel(n, true), n, n)
-			} else {
-				m.log("UDP %s: %d copia(s) direta(s) por original", udpRatioLabel(n, false), n)
-			}
+			m.log("UDP %s: a cada %d originais, %d copia(s) direta(s)", udpRatioLabel(a, b), a, b)
 		case modePing:
 			m.settings.PingTarget = v
 			_ = saveSettings(m.settings)
@@ -760,7 +756,7 @@ func udpDupStatus(s Stats) string {
 	if s.FullTunnel {
 		return lipgloss.NewStyle().Foreground(cYellow).Render("pausado: sistema inteiro")
 	}
-	return lipgloss.NewStyle().Foreground(cYellow).Render(fmt.Sprintf("%s · direto %d · perdas %d · erros %d · forcar %v", udpRatioLabel(s.UDPCopies, s.UDPBatch), s.UDPDupSent, s.UDPDupDropped, s.UDPDupErrors, s.UDPForce))
+	return lipgloss.NewStyle().Foreground(cYellow).Render(fmt.Sprintf("%s · direto %d · perdas %d · erros %d · forcar %v", udpRatioLabel(s.UDPOriginals, s.UDPCopies), s.UDPDupSent, s.UDPDupDropped, s.UDPDupErrors, s.UDPForce))
 }
 
 func mirrorStatus(s Stats) string {
@@ -861,7 +857,7 @@ func (m model) View() string {
 		if m.settings.UDPDuplicate {
 			du = lipgloss.NewStyle().Foreground(cYellow).Render("ligado (experimental)")
 		}
-		stat = append(stat, row("UDP extra", fmt.Sprintf("%s · forcar %v · %s", udpRatioLabel(m.settings.UDPCopies, m.settings.UDPBatch), m.settings.UDPForce, du)))
+		stat = append(stat, row("UDP extra", fmt.Sprintf("%s · forcar %v · %s", udpRatioLabel(m.settings.UDPOriginals, m.settings.UDPCopies), m.settings.UDPForce, du)))
 		stat = append(stat, row("Ordem UDP", fmt.Sprintf("saida recente %v · chegada recente %v", m.settings.UDPNewestOut, m.settings.UDPNewestIn)))
 		md := "só jogo  ([s] muda para sistema inteiro)"
 		if m.settings.FullTunnel {

@@ -27,7 +27,7 @@ func TestLatestQueueNewestFirstAndEvictsOldest(t *testing.T) {
 
 func TestUDPDuplicatorRatioAndNewestFirst(t *testing.T) {
 	d := newUDPDuplicator[int](16, true)
-	d.setRatio(2, false)
+	d.setRatio(1, 2)
 	d.offer([]byte{1}, 1)
 	d.offer([]byte{2}, 2)
 	stop := make(chan struct{})
@@ -54,7 +54,7 @@ func TestUDPDuplicatorRatioAndNewestFirst(t *testing.T) {
 
 func TestUDPDuplicatorFreshnessBoundedConcurrency(t *testing.T) {
 	d := newUDPDuplicator[int](8, true)
-	d.setRatio(4, false)
+	d.setRatio(1, 4)
 	var wg sync.WaitGroup
 	for i := 0; i < 6; i++ {
 		wg.Add(1)

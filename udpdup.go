@@ -34,12 +34,12 @@ type udpDuplicateItem[A any] struct {
 
 type udpDuplicator[A any] struct {
 	enabled    atomic.Bool
-	copies     atomic.Int32
-	batch      atomic.Bool // X:X mode: every X originals release one copy of each
+	originals  atomic.Int32 // A: originals per group
+	copies     atomic.Int32 // B: copies released per group
 	generation atomic.Uint64
 	mu         sync.Mutex
 	queue      []udpDuplicateItem[A]
-	pending    []udpDuplicateItem[A] // X:X originals waiting for their group to fill
+	pending    []udpDuplicateItem[A] // originals waiting for their group to fill
 	capacity   int
 	notify     chan struct{}
 	accepted   atomic.Uint64
@@ -49,28 +49,22 @@ type udpDuplicator[A any] struct {
 }
 
 // udpRatioLabel renders the ratio as originals:copies.
-func udpRatioLabel(n int, batch bool) string {
-	n = normalizeUDPCopies(n)
-	if batch {
-		return fmt.Sprintf("%d:%d", n, n)
-	}
-	return fmt.Sprintf("1:%d", n)
+func udpRatioLabel(originals, copies int) string {
+	return fmt.Sprintf("%d:%d", normalizeUDPCopies(originals), normalizeUDPCopies(copies))
 }
 
-// parseUDPRatio accepts "N" (1:N) or "N:N" (batch).
-func parseUDPRatio(v string) (n int, batch bool, ok bool) {
+// parseUDPRatio accepts "B" (1:B) or "A:B": every A originals release B copies.
+func parseUDPRatio(v string) (originals, copies int, ok bool) {
 	a, b, hasColon := strings.Cut(strings.TrimSpace(v), ":")
-	n, err := strconv.Atoi(strings.TrimSpace(a))
-	if err != nil || n < 1 || n > udpCopiesMax {
-		return 0, false, false
-	}
 	if !hasColon {
-		return n, false, true
+		b, a = a, "1"
 	}
-	if m, err := strconv.Atoi(strings.TrimSpace(b)); err != nil || m != n {
-		return 0, false, false
+	originals, err1 := strconv.Atoi(strings.TrimSpace(a))
+	copies, err2 := strconv.Atoi(strings.TrimSpace(b))
+	if err1 != nil || err2 != nil || originals < 1 || originals > udpCopiesMax || copies < 1 || copies > udpCopiesMax {
+		return 0, 0, false
 	}
-	return n, true, true
+	return originals, copies, true
 }
 
 func normalizeUDPCopies(n int) int {
@@ -89,6 +83,7 @@ func newUDPDuplicator[A any](capacity int, enabled bool) *udpDuplicator[A] {
 	}
 	d := &udpDuplicator[A]{capacity: capacity, notify: make(chan struct{}, 1)}
 	d.enabled.Store(enabled)
+	d.originals.Store(1)
 	d.copies.Store(1)
 	return d
 }
@@ -99,15 +94,15 @@ func (d *udpDuplicator[A]) setEnabled(enabled bool) {
 	d.enabled.Store(enabled)
 }
 
-// setRatio selects 1:n (n copies of every original) or, with batch, n:n
-// (once n originals arrived, one copy of each is queued together).
-func (d *udpDuplicator[A]) setRatio(n int, batch bool) {
+// setRatio sets A:B: once A originals arrived, B copies are queued, newest
+// original first (1:B copies each original; A:A copies each original once).
+func (d *udpDuplicator[A]) setRatio(originals, copies int) {
 	d.generation.Add(1)
 	d.mu.Lock()
 	d.pending = nil
 	d.mu.Unlock()
-	d.copies.Store(int32(normalizeUDPCopies(n)))
-	d.batch.Store(batch)
+	d.originals.Store(int32(normalizeUDPCopies(originals)))
+	d.copies.Store(int32(normalizeUDPCopies(copies)))
 }
 
 func (d *udpDuplicator[A]) offer(original []byte, address A) {
@@ -115,26 +110,20 @@ func (d *udpDuplicator[A]) offer(original []byte, address A) {
 		return
 	}
 	g := d.generation.Load()
-	n := int(d.copies.Load())
-	if !d.enabled.Load() || g != d.generation.Load() || n < 1 {
+	a, b := int(d.originals.Load()), int(d.copies.Load())
+	if !d.enabled.Load() || g != d.generation.Load() || a < 1 || b < 1 {
 		return
 	}
 	// Capture buffers are reused: copy once and share immutable copy between jobs.
 	pkt := append([]byte(nil), original...)
 	item := udpDuplicateItem[A]{packet: pkt, address: address, generation: g}
 	d.mu.Lock()
-	if d.batch.Load() {
-		d.pending = append(d.pending, item)
-		if len(d.pending) >= n {
-			for _, it := range d.pending {
-				d.push(it)
-			}
-			d.pending = nil
+	d.pending = append(d.pending, item)
+	if len(d.pending) >= a {
+		for k := 0; k < b; k++ {
+			d.push(d.pending[len(d.pending)-1-k%len(d.pending)])
 		}
-	} else {
-		for i := 0; i < n; i++ {
-			d.push(item)
-		}
+		d.pending = d.pending[:0]
 	}
 	d.mu.Unlock()
 	select {

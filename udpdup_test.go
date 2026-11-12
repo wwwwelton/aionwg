@@ -134,7 +134,7 @@ func TestUDPOnlyGameSplitNonDNSIsDuplicated(t *testing.T) {
 
 func TestUDPDupBatchReleasesGroupOnlyWhenFull(t *testing.T) {
 	d := newUDPDuplicator[int](64, true)
-	d.setRatio(3, true)
+	d.setRatio(3, 3)
 	d.offer([]byte("a"), 1)
 	d.offer([]byte("b"), 1)
 	if len(d.queue) != 0 {
@@ -144,22 +144,36 @@ func TestUDPDupBatchReleasesGroupOnlyWhenFull(t *testing.T) {
 	if len(d.queue) != 3 {
 		t.Fatalf("3:3 group released %d copies, want 3", len(d.queue))
 	}
-	d.setRatio(2, false) // switching mode drops partial groups, 1:2 copies each original
+	d.setRatio(1, 2) // switching ratio drops partial groups, 1:2 copies each original
 	d.offer([]byte("d"), 1)
 	if len(d.pending) != 0 || len(d.queue) != 5 {
 		t.Fatalf("1:2 mode pending=%d queue=%d", len(d.pending), len(d.queue))
 	}
 }
 
+func TestUDPDupGroupCopiesNewestOnce(t *testing.T) {
+	d := newUDPDuplicator[int](64, true)
+	d.setRatio(3, 1) // every 3 originals: 1 copy of the newest
+	for _, p := range []string{"a", "b", "c"} {
+		d.offer([]byte(p), 1)
+	}
+	if len(d.queue) != 1 || string(d.queue[0].packet) != "c" {
+		t.Fatalf("3:1 queue=%d", len(d.queue))
+	}
+}
+
 func TestParseUDPRatio(t *testing.T) {
-	for in, want := range map[string]struct {
-		n     int
-		batch bool
-		ok    bool
-	}{"3": {3, false, true}, "3:3": {3, true, true}, " 8 : 8 ": {8, true, true}, "2:3": {}, "0": {}, "9:9": {}, "x": {}} {
-		n, b, ok := parseUDPRatio(in)
-		if n != want.n || b != want.batch || ok != want.ok {
-			t.Errorf("%q => %d,%v,%v want %+v", in, n, b, ok, want)
+	for in, want := range map[string][2]int{
+		"3": {1, 3}, "3:3": {3, 3}, " 8 : 1 ": {8, 1}, "3:1": {3, 1},
+	} {
+		a, b, ok := parseUDPRatio(in)
+		if !ok || a != want[0] || b != want[1] {
+			t.Errorf("%q => %d,%d,%v want %v", in, a, b, ok, want)
+		}
+	}
+	for _, in := range []string{"0", "9:9", "2:9", "0:1", "x", "1:", ""} {
+		if _, _, ok := parseUDPRatio(in); ok {
+			t.Errorf("%q accepted", in)
 		}
 	}
 }

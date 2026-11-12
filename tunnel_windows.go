@@ -61,8 +61,8 @@ type EngineOptions struct {
 	PingTarget   string
 	Mirror       bool
 	UDPDuplicate bool // send game UDP extra copies via Windows direct route
-	UDPCopies    int  // X: copies per original (1:X) or group size (X:X)
-	UDPBatch     bool // X:X ratio
+	UDPOriginals int  // A of A:B ratio
+	UDPCopies    int  // B of A:B ratio
 	UDPForce     bool // also copy game UDP outside AllowedIPs; never DNS/LAN/full tunnel
 	UDPNewestOut bool // opt-in latest-first ordering of primary game UDP sends
 	UDPNewestIn  bool // opt-in latest-first ordering of primary game UDP arrivals
@@ -109,8 +109,8 @@ type Stats struct {
 	PingGame         PingResult // ICMP through the tunnel to the game server
 	MirrorOn         bool
 	UDPDupOn         bool   // worker enabled; active only in split-tunnel mode
-	UDPCopies        int    // X of the 1:X / X:X ratio
-	UDPBatch         bool   // X:X ratio
+	UDPOriginals     int    // A of the A:B ratio
+	UDPCopies        int    // B of the A:B ratio
 	UDPForce         bool   // duplicate game UDP outside AllowedIPs
 	UDPNewestOut     bool   // latest-first primary game UDP send
 	UDPNewestIn      bool   // latest-first primary game UDP arrival
@@ -287,7 +287,7 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 	e.mirror = newMirror(opt.Mirror, logf)
 	e.mirror.trace = e.logDisk
 	e.udpDup = newUDPDuplicator[divertAddress](udpDupQueueSize, opt.UDPDuplicate)
-	e.udpDup.setRatio(opt.UDPCopies, opt.UDPBatch)
+	e.udpDup.setRatio(opt.UDPOriginals, opt.UDPCopies)
 	e.udpForce.Store(opt.UDPForce)
 	e.latestOut.Store(opt.UDPNewestOut)
 	e.latestIn.Store(opt.UDPNewestIn)
@@ -886,8 +886,8 @@ func (e *Engine) Stats() Stats {
 	s.MirrorOn = e.mirror.enabled.Load()
 	if e.udpDup != nil {
 		s.UDPDupOn = e.udpDup.enabled.Load()
+		s.UDPOriginals = int(e.udpDup.originals.Load())
 		s.UDPCopies = int(e.udpDup.copies.Load())
-		s.UDPBatch = e.udpDup.batch.Load()
 		s.UDPForce = e.udpForce.Load()
 		s.UDPNewestOut = e.latestOut.Load()
 		s.UDPNewestIn = e.latestIn.Load()
@@ -1035,9 +1035,9 @@ func (e *Engine) SetUDPDuplicate(on bool) {
 	e.udpDup.setEnabled(on)
 }
 
-func (e *Engine) SetUDPRatio(n int, batch bool) {
+func (e *Engine) SetUDPRatio(originals, copies int) {
 	if !e.closing.Load() && e.udpDup != nil {
-		e.udpDup.setRatio(n, batch)
+		e.udpDup.setRatio(originals, copies)
 	}
 }
 func (e *Engine) SetUDPForce(on bool) {
