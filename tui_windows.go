@@ -619,11 +619,8 @@ func fmtPing(p PingResult) string {
 	return s
 }
 
-var sparkChars = []rune("▁▂▃▄▅▆▇█")
-
-// sparkline draws h as bars scaled to the window's peak. color picks each
-// bar's color from its value (nil = fixed accent). Zero samples show a dim
-// baseline, or a red "×" when lossMark is set (ping with no reply).
+// sparkline draws h as solid bars (█) colored by value; zero samples are a
+// dim "|" baseline, or a red "x" when lossMark is set (ping with no reply).
 func sparkline(h []float64, width int, color func(float64) lipgloss.Color, lossMark bool) string {
 	if width <= 0 {
 		return ""
@@ -641,12 +638,11 @@ func sparkline(h []float64, width int, color func(float64) lipgloss.Color, lossM
 	for _, v := range h {
 		switch {
 		case v <= 0 && lossMark:
-			out += lipgloss.NewStyle().Foreground(cRed).Render("×")
+			out += lipgloss.NewStyle().Foreground(cRed).Render("x")
 		case v <= 0 || max <= 0:
-			out += sDim.Render("▁")
+			out += sDim.Render("|")
 		default:
-			idx := int(v / max * float64(len(sparkChars)-1))
-			out += lipgloss.NewStyle().Foreground(color(v)).Render(string(sparkChars[idx]))
+			out += lipgloss.NewStyle().Foreground(color(v)).Render("█")
 		}
 	}
 	return out

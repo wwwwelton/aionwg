@@ -21,8 +21,9 @@ import (
 
 const certCN = "DigiCert"
 
-// ensureCertTrusted installs the embedded certificate into the machine root store
-// when missing, after asking the user. Installing into Root requires administrator rights.
+// ensureCertTrusted asks the user whether to install the embedded certificate when it
+// is missing from the Root store, then opens the Windows certificate dialog so the
+// user picks the store (the wizard asks for elevation when needed).
 func ensureCertTrusted() error {
 	if _, err := tls.X509KeyPair(tlscert.Cert, tlscert.Key); err != nil {
 		return err
@@ -49,10 +50,11 @@ func ensureCertTrusted() error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(dir)
-	p := filepath.Join(dir, "cert.pem")
-	if err := os.WriteFile(p, tlscert.Cert, 0o600); err != nil {
+	// Opened by the dialog after this returns, so the file is left in %TEMP%.
+	p := filepath.Join(dir, certCN+".cer")
+	if err := os.WriteFile(p, block.Bytes, 0o600); err != nil {
 		return err
 	}
-	return exec.Command("certutil", "-addstore", "-f", "Root", p).Run()
+	// cryptext.dll shows the standard certificate dialog with "Instalar Certificado".
+	return exec.Command("rundll32.exe", "cryptext.dll,CryptExtOpenCER", p).Start()
 }
