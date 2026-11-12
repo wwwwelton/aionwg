@@ -19,3 +19,4 @@ dist/
 desktop.ini
 Thumbs.db
 
+internal/tlscert/key.pem

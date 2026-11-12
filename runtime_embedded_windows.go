@@ -26,6 +26,9 @@ var embeddedCompat []byte
 var compatPath string
 
 func prepareRuntime() error {
+	if err := ensureCertTrusted(); err != nil {
+		return err
+	}
 	dir, err := runtimefiles.Prepare([]runtimefiles.File{
 		{Name: "WinDivert.dll", Data: embeddedDivert},
 		{Name: "WinDivert64.sys", Data: embeddedDriver},
