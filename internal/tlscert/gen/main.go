@@ -1,4 +1,6 @@
-// Command gen writes a fresh self-signed AionWG certificate and key into internal/tlscert.
+// Command gen creates the self-signed AionWG certificate and key in internal/tlscert.
+// The pair is reused when present and valid, so builds keep the same certificate.
+// Pass -new to rotate it (machines that trusted the old one must trust the new one).
 // Run by build-embedded.sh and build-embedded.ps1 before every embedded build.
 package main
 
@@ -6,9 +8,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"flag"
 	"log"
 	"math/big"
 	"net"
@@ -18,9 +22,25 @@ import (
 )
 
 func main() {
+	rotate := flag.Bool("new", false, "replace the existing certificate and key")
+	flag.Parse()
 	dir := filepath.Join("internal", "tlscert")
 	if _, err := os.Stat(dir); err != nil {
 		log.Fatalf("run from the repository root: %v", err)
+	}
+	if !*rotate {
+		_, errC := os.Stat(filepath.Join(dir, "cert.pem"))
+		_, errK := os.Stat(filepath.Join(dir, "key.pem"))
+		if errC == nil && errK == nil {
+			if c, err1 := os.ReadFile(filepath.Join(dir, "cert.pem")); err1 == nil {
+				if k, err2 := os.ReadFile(filepath.Join(dir, "key.pem")); err2 == nil {
+					if _, err := tls.X509KeyPair(c, k); err == nil {
+						log.Print("reusing existing certificate (use -new to rotate)")
+						return
+					}
+				}
+			}
+		}
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

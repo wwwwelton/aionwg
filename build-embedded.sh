@@ -11,7 +11,7 @@ done
 x86_64-w64-mingw32-gcc -shared -O2 -Wall -Wextra -Werror -static-libgcc \
   -Wl,--nxcompat,--dynamicbase,--high-entropy-va \
   -o shugo-compat.dll native/shugo-compat.c
-# Fresh self-signed certificate for every build (see internal/tlscert).
+# Reuse the self-signed certificate in internal/tlscert (-new rotates it).
 go run ./internal/tlscert/gen
 mkdir -p dist/standalone
 export GOOS=windows GOARCH=amd64 CGO_ENABLED=0
