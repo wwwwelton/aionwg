@@ -15,6 +15,7 @@ import (
 
 const (
 	divertLayerNetwork = 0
+	divertLayerSocket  = 3
 
 	divertFlagSniff    = 0x0001
 	divertFlagRecvOnly = 0x0004
@@ -129,6 +130,17 @@ func (h divertHandle) recv(buf []byte, addr *divertAddress) (int, error) {
 		return 0, e
 	}
 	return int(n), nil
+}
+
+// recvEvent receives one event from a layer that carries no packet data
+// (FLOW, SOCKET). The WinDivert documentation requires pPacket == NULL and
+// packetLen == 0 for those layers.
+func (h divertHandle) recvEvent(addr *divertAddress) error {
+	r, _, e := procRecv.Call(uintptr(h), 0, 0, 0, uintptr(unsafe.Pointer(addr)))
+	if r == 0 {
+		return e
+	}
+	return nil
 }
 
 func (h divertHandle) send(pkt []byte, addr *divertAddress) error {

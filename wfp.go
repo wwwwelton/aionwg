@@ -166,3 +166,89 @@ func (t *wfpTable) Class(proto uint8, port uint16, now time.Time) (class uint8, 
 	}
 	return classNone, true
 }
+
+// WinDivert SOCKET layer events (windivert.h). Only the ones that name the
+// owner of an outgoing port matter here.
+const (
+	wdEventSocketBind    = 3
+	wdEventSocketConnect = 4
+	wdEventSocketClose   = 7
+)
+
+// wdAddrSize is sizeof(WINDIVERT_ADDRESS); the layer data union starts at 16.
+const (
+	wdAddrSize     = 80
+	wdAddrUnion    = 16
+	wdSockPID      = wdAddrUnion + 16 // after EndpointId and ParentEndpointId
+	wdSockLocalprt = wdSockPID + 4 + 16 + 16
+	wdSockProto    = wdSockLocalprt + 4
+)
+
+// wfpEvent is one decoded SOCKET layer event.
+type wfpEvent struct {
+	event uint8
+	pid   uint32
+	port  uint16
+	proto uint8
+}
+
+// decodeSocketEvent reads a raw WINDIVERT_ADDRESS. ok is false for events and
+// protocols the table does not track, so unknown input is ignored, never fatal.
+func decodeSocketEvent(raw []byte) (ev wfpEvent, ok bool) {
+	if len(raw) < wdAddrSize {
+		return ev, false
+	}
+	ev.event = raw[9] // Event:8 sits right after Layer:8 in the first bit-field
+	switch ev.event {
+	case wdEventSocketBind, wdEventSocketConnect, wdEventSocketClose:
+	default:
+		return ev, false
+	}
+	ev.pid = uint32(raw[wdSockPID]) | uint32(raw[wdSockPID+1])<<8 |
+		uint32(raw[wdSockPID+2])<<16 | uint32(raw[wdSockPID+3])<<24
+	ev.port = uint16(raw[wdSockLocalprt]) | uint16(raw[wdSockLocalprt+1])<<8
+	ev.proto = raw[wdSockProto]
+	if ev.proto != protoTCP && ev.proto != protoUDP || ev.port == 0 || ev.pid == 0 {
+		return ev, false
+	}
+	return ev, true
+}
+
+// Apply updates the table from one event.
+func (t *wfpTable) Apply(ev wfpEvent, now time.Time) {
+	if ev.event == wdEventSocketClose {
+		t.Close(ev.proto, ev.port, ev.pid)
+		return
+	}
+	t.Bind(ev.proto, ev.port, ev.pid, now)
+}
+
+// Decide returns the owner class for a local port in WFP mode. The SOCKET
+// layer cannot see sockets opened before its handle, so when it has no record
+// the system table is asked instead (fallback). fallback reports whether the
+// port belongs to a selected app, so WFP mode never captures less than the
+// default mode would for the same apps, and never captures anything that is
+// not selected.
+func (t *wfpTable) Decide(proto uint8, port uint16, now time.Time, fallback func() bool) uint8 {
+	if class, known := t.Class(proto, port, now); known {
+		return class
+	}
+	if fallback != nil && fallback() {
+		return classGame
+	}
+	return classNone
+}
+
+// SelectedPIDs returns the live PIDs of selected apps and their descendants, in
+// the shape dumpOwnedPorts expects.
+func (t *wfpTable) SelectedPIDs() map[uint32]uint8 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := map[uint32]uint8{}
+	for pid := range t.procs {
+		if t.selectedLocked(pid, 0) {
+			out[pid] = classGame
+		}
+	}
+	return out
+}

@@ -102,3 +102,105 @@ func TestWFPSetAppsInvalidatesDecision(t *testing.T) {
 		t.Fatal("empty selection must tunnel nothing")
 	}
 }
+
+// sockAddr builds a WINDIVERT_ADDRESS the way the driver lays it out
+// (windivert.h): Timestamp(8) Layer(1) Event(1) flags(2) Reserved2(4), then the
+// Socket union: EndpointId(8) ParentEndpointId(8) ProcessId(4) LocalAddr(16)
+// RemoteAddr(16) LocalPort(2) RemotePort(2) Protocol(1).
+func sockAddr(event uint8, pid uint32, port uint16, proto uint8) []byte {
+	b := make([]byte, wdAddrSize)
+	b[8], b[9] = 3, event // Layer = SOCKET
+	le32 := func(o int, v uint32) {
+		b[o], b[o+1], b[o+2], b[o+3] = byte(v), byte(v>>8), byte(v>>16), byte(v>>24)
+	}
+	le32(16, 0xAAAAAAAA) // EndpointId (must not be mistaken for the PID)
+	le32(24, 0xBBBBBBBB) // ParentEndpointId
+	le32(32, pid)
+	b[32+4+16+16], b[32+4+16+16+1] = byte(port), byte(port>>8)
+	b[32+4+16+16+4] = proto
+	return b
+}
+
+func TestDecodeSocketEvent(t *testing.T) {
+	ev, ok := decodeSocketEvent(sockAddr(wdEventSocketConnect, 4242, 51000, protoTCP))
+	if !ok || ev.pid != 4242 || ev.port != 51000 || ev.proto != protoTCP || ev.event != wdEventSocketConnect {
+		t.Fatalf("got %+v ok=%v", ev, ok)
+	}
+	ev, ok = decodeSocketEvent(sockAddr(wdEventSocketBind, 7, 65535, protoUDP))
+	if !ok || ev.pid != 7 || ev.port != 65535 || ev.proto != protoUDP {
+		t.Fatalf("udp bind: %+v ok=%v", ev, ok)
+	}
+}
+
+func TestDecodeSocketEventIgnoresWhatItCannotTrust(t *testing.T) {
+	for name, raw := range map[string][]byte{
+		"short buffer":   make([]byte, wdAddrSize-1),
+		"listen event":   sockAddr(5, 1, 80, protoTCP),
+		"accept event":   sockAddr(6, 1, 80, protoTCP),
+		"network packet": sockAddr(0, 1, 80, protoTCP),
+		"icmp protocol":  sockAddr(wdEventSocketConnect, 1, 80, 1),
+		"port zero":      sockAddr(wdEventSocketConnect, 1, 0, protoTCP),
+		"pid zero":       sockAddr(wdEventSocketConnect, 0, 80, protoTCP),
+	} {
+		if _, ok := decodeSocketEvent(raw); ok {
+			t.Errorf("%s: must be ignored", name)
+		}
+	}
+}
+
+func TestWFPApplyBindThenClose(t *testing.T) {
+	tb := newTestTable()
+	conn, _ := decodeSocketEvent(sockAddr(wdEventSocketConnect, 11, 52000, protoTCP))
+	tb.Apply(conn, t0)
+	if c, known := tb.Class(protoTCP, 52000, t0); c != classGame || !known {
+		t.Fatalf("child of the game not tunnelled: (%d,%v)", c, known)
+	}
+	cl, _ := decodeSocketEvent(sockAddr(wdEventSocketClose, 11, 52000, protoTCP))
+	tb.Apply(cl, t0)
+	if _, known := tb.Class(protoTCP, 52000, t0); known {
+		t.Fatal("CLOSE must forget the port")
+	}
+}
+
+func TestWFPDecideUsesFallbackOnlyWhenSocketLayerHasNoRecord(t *testing.T) {
+	tb := newTestTable()
+	calls := 0
+	yes := func() bool { calls++; return true }
+	no := func() bool { calls++; return false }
+
+	// Known to the SOCKET layer: the fallback must not be asked, and a known
+	// non-selected owner must not be overridden by the system table.
+	tb.Bind(protoTCP, 9000, 20, t0)
+	if got := tb.Decide(protoTCP, 9000, t0, yes); got != classNone || calls != 0 {
+		t.Fatalf("known owner overridden: class=%d calls=%d", got, calls)
+	}
+	tb.Bind(protoTCP, 9001, 10, t0)
+	if got := tb.Decide(protoTCP, 9001, t0, no); got != classGame || calls != 0 {
+		t.Fatalf("known selected owner lost: class=%d calls=%d", got, calls)
+	}
+
+	// Unknown (socket opened before the handle): the system table decides.
+	if got := tb.Decide(protoTCP, 9100, t0, yes); got != classGame {
+		t.Fatalf("fallback hit ignored: %d", got)
+	}
+	if got := tb.Decide(protoTCP, 9100, t0, no); got != classNone {
+		t.Fatalf("fallback miss captured: %d", got)
+	}
+	if got := tb.Decide(protoTCP, 9100, t0, nil); got != classNone {
+		t.Fatalf("nil fallback must capture nothing: %d", got)
+	}
+}
+
+func TestWFPSelectedPIDsListsAppsAndDescendantsOnly(t *testing.T) {
+	got := newTestTable().SelectedPIDs()
+	for _, pid := range []uint32{10, 11, 12} {
+		if got[pid] != classGame {
+			t.Errorf("pid %d must be selected", pid)
+		}
+	}
+	for _, pid := range []uint32{1, 20, 30, 31} {
+		if _, ok := got[pid]; ok {
+			t.Errorf("pid %d must not be selected", pid)
+		}
+	}
+}
