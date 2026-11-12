@@ -22,6 +22,8 @@ Teclas
   [Enter]  conectar / desconectar
   [p]      editar a lista de executáveis tunelados
   [s]      alterna SÓ JOGO / SISTEMA INTEIRO
+  [w]      liga/desliga o modo WFP (só os apps marcados passam pelo túnel)
+  [l]      lista de programas abertos para marcar no modo WFP
   [n]      liga/desliga o DNS pelo túnel (modo sistema inteiro)
   [m]      liga/desliga o espelho para DPS meter
   [x]      autoteste: DNS, IP de saída, Steam, download e upload pelo túnel
@@ -59,6 +61,33 @@ Modo sistema inteiro ([s])
   desligado, o DNS sai direto pelo seu provedor.
   Pode trocar de modo com o túnel ligado; conexões abertas caem uma vez e
   reconectam. ICMP (ping do Windows) não passa pelo túnel.
+
+Modo WFP ([w] liga/desliga, [l] escolhe os apps)
+  Túnel só para os aplicativos que você marcar, qualquer um (Discord, navegador,
+  launcher...), não só o jogo. A lista [l] mostra os programas abertos agora:
+  [↑/↓] move, [espaço] marca/desmarca, [Esc] ou [Enter] fecha. Um app marcado
+  que foi fechado continua na lista (aparece como "fechado"), então a escolha
+  não se perde. O que você marca vale na hora e fica salvo.
+  Com o WFP ligado ele SUBSTITUI os outros modos: a lista [p] e o SISTEMA
+  INTEIRO ([s]) são ignorados, e só os apps marcados passam pelo túnel. As
+  configurações de [p] e [s] ficam guardadas; ao desligar o WFP elas voltam.
+  Processos abertos por um app marcado também entram no túnel. O autoteste
+  [x] continua usando o túnel.
+  Só o jogo (executável que começa com "Aion2") recebe o tratamento de jogo:
+  espelho para DPS meter ([m]), UDP extra ([u]/[f]), ordem "mais recente"
+  ([o]/[a]) e o ping "Jogo (túnel)". Qualquer outro app marcado, como
+  Discord ou navegador, só passa pelo túnel, sem nenhuma dessas opções, que
+  foram feitas para o jogo e podem prejudicar outros programas. Os filhos de
+  um app seguem a regra do app marcado, não a do próprio nome.
+  Como funciona: o AionWG acompanha quem abre cada conexão pela camada SOCKET
+  do WinDivert (Windows Filtering Platform), que informa o programa no momento
+  em que a conexão nasce, antes do primeiro pacote. Limites:
+  * Programas que já tinham conexões abertas ANTES de você conectar o túnel só
+    são identificados pela tabela do sistema, com até ~2 s de atraso.
+  * Se a camada SOCKET não abrir (driver bloqueado, antivírus), o modo
+    continua funcionando pela tabela do sistema e a tela avisa.
+  * Ligar o WFP sem marcar nenhum app abre a lista, pois sozinho ele não
+    tuneliza nada.
 
 DPS meter (NotMeter, Shugo.gg, A2Tools…)
   Os meters leem os pacotes do jogo com o Npcap. Com o túnel, esses pacotes
