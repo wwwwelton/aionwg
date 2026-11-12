@@ -9,9 +9,13 @@ configs-wireguard-oficial/
 *.zip
 dist/
 
+# Dependências nativas versionadas: embutidas no EXE (build-embedded.*).
+!WinDivert.dll
+!WinDivert64.sys
+!wintun.dll
+!shugo-compat.dll
+
 # Ruído do Windows.
 desktop.ini
 Thumbs.db
 
-# Licença do WinDivert acompanha os binários, não o código.
-WinDivert-LICENSE.txt

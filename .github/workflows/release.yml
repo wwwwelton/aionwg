@@ -12,13 +12,6 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  # Official archives; the hashes pin exactly what gets embedded into the EXE.
-  WINDIVERT_URL: https://reqrypt.org/download/WinDivert-2.2.2-A.zip
-  WINDIVERT_SHA256: 63cb41763bb4b20f600b6de04e991a9c2be73279e317d4d82f237b150c5f3f15
-  WINTUN_URL: https://www.wintun.net/builds/wintun-0.14.1.zip
-  WINTUN_SHA256: 07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51
-
 jobs:
   test-windows:
     runs-on: windows-latest
@@ -46,18 +39,6 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 zip
       - name: Native regression check
         run: cc -std=c11 -Wall -Wextra -Werror native/shugo-compat-test.c -o /tmp/shugo-check && /tmp/shugo-check
-      - name: Fetch pinned WinDivert and Wintun
-        run: |
-          set -euo pipefail
-          curl -fsSLo wd.zip "$WINDIVERT_URL"
-          curl -fsSLo wt.zip "$WINTUN_URL"
-          echo "$WINDIVERT_SHA256  wd.zip" | sha256sum -c -
-          echo "$WINTUN_SHA256  wt.zip" | sha256sum -c -
-          unzip -qo wd.zip -d dl
-          unzip -qo wt.zip -d dl
-          cp dl/WinDivert-2.2.2-A/x64/WinDivert.dll dl/WinDivert-2.2.2-A/x64/WinDivert64.sys .
-          cp dl/WinDivert-2.2.2-A/LICENSE WinDivert-LICENSE.txt
-          cp dl/wintun/bin/amd64/wintun.dll .
       - name: Build embedded EXE
         run: ./build-embedded.sh
       - name: Compute next version
