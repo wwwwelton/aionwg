@@ -38,13 +38,14 @@ func enqueueProgramLog(queue chan<- logMsg, msg logMsg) {
 // ---------------------------------------------------------------- styles
 
 var (
-	cAccent = lipgloss.Color("#B48CFF")
-	cGreen  = lipgloss.Color("#5FD787")
-	cYellow = lipgloss.Color("#FFD75F")
-	cRed    = lipgloss.Color("#FF5F5F")
-	cDim    = lipgloss.Color("#7A7A8C")
-	cUp     = lipgloss.Color("#FF9F5F")
-	cDown   = lipgloss.Color("#5FAFFF")
+	cAccent  = lipgloss.Color("#B48CFF")
+	cGreen   = lipgloss.Color("#5FD787")
+	cYellow  = lipgloss.Color("#FFD75F")
+	cRed     = lipgloss.Color("#FF5F5F")
+	cDim     = lipgloss.Color("#7A7A8C")
+	cUp      = lipgloss.Color("#FF9F5F")
+	cDown    = lipgloss.Color("#5FAFFF")
+	cShimmer = lipgloss.Color("#FFFFFF")
 
 	sTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(cAccent).Padding(0, 1)
 	sBox   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cAccent).Padding(0, 1)
@@ -71,6 +72,7 @@ const (
 
 type (
 	tickMsg      time.Time
+	animMsg      struct{}
 	logMsg       string
 	connectedMsg struct {
 		eng  *Engine
@@ -82,6 +84,7 @@ type (
 )
 
 type model struct {
+	frame    int // animation frame, advances every animTick
 	settings Settings
 	configs  []string
 	cursor   int
@@ -158,7 +161,12 @@ func tick() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
-func (m model) Init() tea.Cmd { return tea.Batch(tick(), textinput.Blink) }
+// animTick drives chart shimmer; faster than the 1s data tick.
+func animTick() tea.Cmd {
+	return tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return animMsg{} })
+}
+
+func (m model) Init() tea.Cmd { return tea.Batch(tick(), animTick(), textinput.Blink) }
 
 func connectCmd(name string, s Settings) tea.Cmd {
 	return func() tea.Msg {
@@ -200,6 +208,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
+
+	case animMsg:
+		m.frame++
+		return m, animTick()
 
 	case tickMsg:
 		if m.eng != nil {
@@ -621,7 +633,7 @@ func fmtPing(p PingResult) string {
 
 // sparkline draws h as solid bars (█) colored by value; zero samples are a
 // dim "|" baseline, or a red "x" when lossMark is set (ping with no reply).
-func sparkline(h []float64, width int, color func(float64) lipgloss.Color, lossMark bool) string {
+func sparkline(h []float64, width int, color func(float64) lipgloss.Color, lossMark bool, frame int) string {
 	if width <= 0 {
 		return ""
 	}
@@ -635,14 +647,19 @@ func sparkline(h []float64, width int, color func(float64) lipgloss.Color, lossM
 		}
 	}
 	out := strings.Repeat(" ", width-len(h))
-	for _, v := range h {
+	for i, v := range h {
 		switch {
 		case v <= 0 && lossMark:
 			out += lipgloss.NewStyle().Foreground(cRed).Render("x")
 		case v <= 0 || max <= 0:
 			out += sDim.Render("|")
 		default:
-			out += lipgloss.NewStyle().Foreground(color(v)).Render("█")
+			// Shimmer: a bright column travels left to right across the bars.
+			fg := color(v)
+			if (i+frame)%4 == 0 {
+				fg = cShimmer
+			}
+			out += lipgloss.NewStyle().Foreground(fg).Render("█")
 		}
 	}
 	return out
@@ -874,7 +891,7 @@ func (m model) View() string {
 			row("VPN direto", fmtPing(s.PingEndpoint)+sDim.Render("  "+s.PingEndpoint.Target)),
 			row("Túnel", fmtPing(s.PingTunnel)+sDim.Render("  "+s.PingTunnel.Target)),
 			row(gameLbl, fmtPing(s.PingGame)+sDim.Render("  "+s.PingGame.Target)),
-			sLabel.Render(fmt.Sprintf("%-12s", "Histórico"))+sparkline(m.histPing, inner-14, func(v float64) lipgloss.Color { return pingColor(v) }, true),
+			sLabel.Render(fmt.Sprintf("%-12s", "Histórico"))+sparkline(m.histPing, inner-14, func(v float64) lipgloss.Color { return pingColor(v) }, true, m.frame),
 			sLabel.Render(fmt.Sprintf("%-12s", ""))+histStats(m.histPing, func(v float64) string { return fmt.Sprintf("%.0f ms", v) }),
 		)
 	}
@@ -901,8 +918,8 @@ func (m model) View() string {
 			row("", sDim.Render(fmt.Sprintf("total ▲ %s  ▼ %s", fmtBytes(s.GameUp), fmtBytes(s.GameDown)))),
 			row("WireGuard", sDim.Render(fmt.Sprintf("▲ %s  ▼ %s  (com overhead · total ▲ %s ▼ %s)",
 				fmtRate(m.wgTxRate), fmtRate(m.wgRxRate), fmtBytes(s.WGTx), fmtBytes(s.WGRx)))),
-			sLabel.Render(fmt.Sprintf("%-12s", "Upload"))+rateChart(m.histUp, inner-14, fixedColor(cUp)),
-			sLabel.Render(fmt.Sprintf("%-12s", "Download"))+rateChart(m.histDown, inner-14, fixedColor(cDown)),
+			sLabel.Render(fmt.Sprintf("%-12s", "Upload"))+rateChart(m.histUp, inner-14, fixedColor(cUp), m.frame),
+			sLabel.Render(fmt.Sprintf("%-12s", "Download"))+rateChart(m.histDown, inner-14, fixedColor(cDown), m.frame),
 		)
 	}
 
@@ -1161,11 +1178,11 @@ func runTUI() error {
 
 // rateChart draws a throughput history with its min/med/max summary, shrinking
 // the bars so the line still fits the panel.
-func rateChart(h []float64, width int, color func(float64) lipgloss.Color) string {
+func rateChart(h []float64, width int, color func(float64) lipgloss.Color, frame int) string {
 	st := histStats(h, fmtRate)
 	w := width - lipgloss.Width(st)
 	if w < 10 {
 		w, st = width, ""
 	}
-	return sparkline(h, w, color, false) + st
+	return sparkline(h, w, color, false, frame) + st
 }
