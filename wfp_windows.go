@@ -16,6 +16,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// wfpFallbackTTL bounds how long one system-table dump answers for every port.
+const wfpFallbackTTL = 2 * time.Second
+
 // wfpMonitor owns the SOCKET handle and the process tree for one engine.
 type wfpMonitor struct {
 	table *wfpTable
@@ -23,22 +26,55 @@ type wfpMonitor struct {
 	logf  func(string, ...any)
 	stop  chan struct{}
 	wg    sync.WaitGroup
+
+	fbMu    sync.Mutex
+	fbPorts map[portKey]uint8 // ports of selected apps, from the system table
+	fbAt    time.Time
 }
 
-// startWFPMonitor opens the SOCKET layer. It is sniff-only and receive-only
-// (mandatory for this layer): it can never block or delay a socket operation,
-// so a stuck AionWG cannot freeze the apps it watches.
-func startWFPMonitor(table *wfpTable, logf func(string, ...any)) (*wfpMonitor, error) {
+// startWFPMonitor always returns a working monitor: the process tree refresh and
+// the system-table fallback need no driver. The SOCKET layer handle is optional;
+// when it cannot be opened (driver blocked...) the error is logged and every
+// port is answered from the system table instead. The handle is sniff-only and
+// receive-only (mandatory for this layer), so it can never block or delay a
+// socket operation: a stuck AionWG cannot freeze the apps it watches.
+func startWFPMonitor(table *wfpTable, logf func(string, ...any)) *wfpMonitor {
+	m := &wfpMonitor{table: table, logf: logf, stop: make(chan struct{})}
+	m.refreshProcesses()
+	m.wg.Add(1)
+	go m.processLoop()
 	h, err := divertOpen("true", divertLayerSocket, 0, divertFlagSniff|divertFlagRecvOnly)
 	if err != nil {
-		return nil, err
+		logf("aviso: WFP sem camada SOCKET (%v) — usando a tabela do sistema", err)
+		return m
 	}
-	m := &wfpMonitor{table: table, h: h, logf: logf, stop: make(chan struct{})}
-	m.refreshProcesses()
-	m.wg.Add(2)
+	m.h = h
+	m.wg.Add(1)
 	go m.eventLoop()
-	go m.processLoop()
-	return m, nil
+	return m
+}
+
+// systemOwns reports whether the system TCP/UDP table says a selected app owns
+// the port. It serves sockets the SOCKET layer never saw (opened before its
+// handle). One dump answers every port for wfpFallbackTTL, so a burst of
+// packets does not dump the table per packet.
+func (m *wfpMonitor) systemOwns(proto uint8, port uint16) bool {
+	m.fbMu.Lock()
+	defer m.fbMu.Unlock()
+	if m.fbPorts == nil || time.Since(m.fbAt) > wfpFallbackTTL {
+		m.fbPorts, _ = dumpOwnedPorts(m.table.SelectedPIDs())
+		m.fbAt = time.Now()
+	}
+	_, ok := m.fbPorts[portKey{proto, port}]
+	return ok
+}
+
+// invalidateFallback drops the cached system-table answer, so a changed app
+// selection applies to the next packet instead of after wfpFallbackTTL.
+func (m *wfpMonitor) invalidateFallback() {
+	m.fbMu.Lock()
+	m.fbPorts = nil
+	m.fbMu.Unlock()
 }
 
 func (m *wfpMonitor) eventLoop() {
@@ -82,12 +118,16 @@ func (m *wfpMonitor) refreshProcesses() {
 	}
 }
 
-// Close stops both goroutines and releases the handle.
+// Close stops the goroutines and releases the handle, if one was opened.
 func (m *wfpMonitor) Close() {
 	close(m.stop)
-	m.h.shutdown()
+	if m.h != 0 {
+		m.h.shutdown()
+	}
 	m.wg.Wait()
-	m.h.close()
+	if m.h != 0 {
+		m.h.close()
+	}
 }
 
 // snapshotProcesses returns pid -> {lower-case exe, parent pid}, or nil if the

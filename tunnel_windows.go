@@ -65,7 +65,9 @@ type EngineOptions struct {
 	UDPNewestOut bool // opt-in latest-first ordering of primary game UDP sends
 	UDPNewestIn  bool // opt-in latest-first ordering of primary game UDP arrivals
 	FullTunnel   bool
-	NoDNS        bool // full tunnel: do NOT redirect DNS into the tunnel
+	NoDNS        bool     // full tunnel: do NOT redirect DNS into the tunnel
+	WFP          bool     // tunnel only WFPApps; replaces the port and full-tunnel modes
+	WFPApps      []string // executables the user picked for WFP mode
 }
 
 // Diag are counters for the diagnostics panel.
@@ -118,6 +120,8 @@ type Stats struct {
 	FullTunnel       bool
 	DNS              string // DNS used for the full tunnel ("" = none in config)
 	IPv6Direct       bool   // full tunnel but config has no IPv6 address
+	WFPOn            bool   // WFP mode: only the selected apps are tunnelled
+	WFPSocket        bool   // SOCKET layer open (false = system-table fallback only)
 	DNSTunnel        bool   // DNS redirect active
 	Diag             Diag
 	Endpoint         string
@@ -162,6 +166,8 @@ type Engine struct {
 	gameUp, gameDown                           atomic.Uint64
 	full                                       atomic.Bool
 	noDNS                                      atomic.Bool
+	wfpOn                                      atomic.Bool // WFP mode: only the selected apps are tunnelled
+	wfp                                        *wfpMonitor // nil when the SOCKET layer could not be opened
 	cCaptured, cInjected, cInNoNAT, cInjectErr atomic.Uint64
 	cSegmented, cICMPErr, cDNSQ, cDNSA         atomic.Uint64
 	cV6Block                                   atomic.Uint64
@@ -287,6 +293,14 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 	e.meterOpener = openMeterAdapter
 	e.full.Store(opt.FullTunnel)
 	e.noDNS.Store(opt.NoDNS)
+	// The SOCKET layer cannot see sockets opened before its handle, so the
+	// monitor starts with the engine (not when WFP is toggled on): by the time
+	// the user enables WFP it already knows the apps' sockets. It degrades to the
+	// system table if the SOCKET layer cannot open; it never blocks the tunnel.
+	table := newWFPTable()
+	table.SetApps(opt.WFPApps)
+	e.wfp = startWFPMonitor(table, logf)
+	e.wfpOn.Store(opt.WFP)
 	e.tun = newSplitTun(conf.MTU)
 	e.tun.onInbound = e.handleInbound
 
@@ -394,6 +408,20 @@ func (e *Engine) divertLoop() {
 	}
 }
 
+// classify decides which class of traffic a local port carries and whether the
+// system-wide full tunnel applies. The precedence rule lives in resolveClass.
+func (e *Engine) classify(proto uint8, port uint16) (class uint8, full bool) {
+	on := e.wfp != nil && e.wfpOn.Load()
+	return resolveClass(on,
+		func() uint8 { return e.owner.Class(proto, port) },
+		e.full.Load(),
+		func() uint8 {
+			return e.wfp.table.Decide(proto, port, time.Now(), func() bool {
+				return e.wfp.systemOwns(proto, port)
+			})
+		})
+}
+
 // capture diverts the packet into the tunnel if it belongs to a listed
 // process (or to anything, in full-tunnel mode).
 func (e *Engine) capture(pkt []byte, addr *divertAddress) bool {
@@ -412,8 +440,7 @@ func (e *Engine) capture(pkt []byte, addr *divertAddress) bool {
 			}
 		}
 	}
-	full := e.full.Load()
-	class := e.owner.Class(p.proto, p.srcPort)
+	class, full := e.classify(p.proto, p.srcPort)
 	if class == classNone && !full {
 		return false
 	}
@@ -763,6 +790,14 @@ func (e *Engine) Stats() Stats {
 		dns = append(dns, d.String())
 	}
 	s.DNS = strings.Join(dns, ", ")
+	wfpOn := e.wfpOn.Load() && e.wfp != nil
+	s.WFPOn = wfpOn
+	s.WFPSocket = e.wfp != nil && e.wfp.h != 0
+	// WFP replaces the full tunnel, so it must not be reported while it is on.
+	s.FullTunnel = s.FullTunnel && !wfpOn
+	if wfpOn {
+		s.Procs = e.wfp.table.SelectedProcs()
+	}
 	s.IPv6Direct = s.FullTunnel && !e.addr6.IsValid()
 	s.DNSTunnel = s.FullTunnel && !e.noDNS.Load() && len(e.conf.DNS) > 0
 	s.Diag = Diag{
@@ -946,6 +981,23 @@ func (e *Engine) SetFullTunnel(on bool) { e.full.Store(on) }
 
 func (e *Engine) SetNoDNS(off bool) { e.noDNS.Store(off) }
 
+// SetWFP switches WFP mode. Both calls only touch atomics and a mutex-guarded
+// map, so they are safe on Bubble Tea's Update goroutine.
+func (e *Engine) SetWFP(on bool) {
+	if !e.closing.Load() {
+		e.wfpOn.Store(on)
+	}
+}
+
+// SetWFPApps replaces the executables tunnelled in WFP mode; it applies to
+// sockets already open, without reconnecting.
+func (e *Engine) SetWFPApps(names []string) {
+	if !e.closing.Load() && e.wfp != nil {
+		e.wfp.table.SetApps(names)
+		e.wfp.invalidateFallback()
+	}
+}
+
 // ObservedRemotes returns server addresses used by the game and Steam.
 func (e *Engine) ObservedRemotes() []netip.Addr {
 	e.natMu.Lock()
@@ -987,6 +1039,9 @@ func (e *Engine) Close() {
 	}
 	if e.owner != nil {
 		e.owner.Close()
+	}
+	if e.wfp != nil {
+		e.wfp.Close()
 	}
 	if e.mirror != nil {
 		e.mirror.Close()

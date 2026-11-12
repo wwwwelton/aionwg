@@ -204,3 +204,49 @@ func TestWFPSelectedPIDsListsAppsAndDescendantsOnly(t *testing.T) {
 		}
 	}
 }
+
+// The user's requirement: with WFP on, neither the port-based process list nor
+// the full-system tunnel decides anything; only the selected apps do.
+func TestResolveClassWFPReplacesPortAndSystemModes(t *testing.T) {
+	port := func(c uint8) func() uint8 { return func() uint8 { return c } }
+	wfp := func(c uint8) func() uint8 { return func() uint8 { return c } }
+
+	for _, c := range []struct {
+		name      string
+		on        bool
+		portClass uint8
+		full      bool
+		wfpClass  uint8
+		wantClass uint8
+		wantFull  bool
+	}{
+		// WFP off: port-based mode and full tunnel behave exactly as before.
+		{"off, listed process", false, classGame, false, classNone, classGame, false},
+		{"off, not listed", false, classNone, false, classGame, classNone, false},
+		{"off, full tunnel", false, classNone, true, classNone, classNone, true},
+
+		// WFP on: only the selected apps count.
+		{"on, selected app", true, classNone, false, classGame, classGame, false},
+		{"on, not selected", true, classNone, false, classNone, classNone, false},
+		{"on, port-listed but not selected", true, classGame, false, classNone, classNone, false},
+		{"on, full tunnel requested is ignored", true, classNone, true, classNone, classNone, false},
+		{"on, full tunnel ignored, app still tunnelled", true, classNone, true, classGame, classGame, false},
+
+		// AionWG's own traffic (self-test) must keep using the tunnel.
+		{"on, self-test", true, classSelf, true, classNone, classSelf, false},
+	} {
+		gotClass, gotFull := resolveClass(c.on, port(c.portClass), c.full, wfp(c.wfpClass))
+		if gotClass != c.wantClass || gotFull != c.wantFull {
+			t.Errorf("%s: got (class %d, full %v), want (class %d, full %v)",
+				c.name, gotClass, gotFull, c.wantClass, c.wantFull)
+		}
+	}
+}
+
+// With WFP off the selected-app decision must never be evaluated: it can dump
+// the system table, which the default mode must not pay for.
+func TestResolveClassOffNeverRunsWFPDecision(t *testing.T) {
+	resolveClass(false,
+		func() uint8 { return classNone }, false,
+		func() uint8 { t.Fatal("WFP decision evaluated while WFP is off"); return classNone })
+}

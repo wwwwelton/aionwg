@@ -31,12 +31,6 @@ type ownerEntry struct {
 	expires time.Time
 }
 
-// ProcInfo is a matched listed process.
-type ProcInfo struct {
-	PID  uint32
-	Name string
-}
-
 type procMeta struct {
 	name  string
 	class uint8

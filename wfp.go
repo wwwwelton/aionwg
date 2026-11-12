@@ -32,6 +32,12 @@ type portKey struct {
 	port  uint16
 }
 
+// ProcInfo is a matched running process.
+type ProcInfo struct {
+	PID  uint32
+	Name string
+}
+
 // wfpTable maps a local port to the PID that owns it and answers whether that
 // PID belongs to a selected app (or descends from one).
 type wfpTable struct {
@@ -251,4 +257,42 @@ func (t *wfpTable) SelectedPIDs() map[uint32]uint8 {
 		}
 	}
 	return out
+}
+
+// SelectedProcs lists the live selected processes (apps and descendants) with
+// the executable name, for the status panel.
+func (t *wfpTable) SelectedProcs() []ProcInfo {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []ProcInfo
+	for pid, p := range t.procs {
+		if t.selectedLocked(pid, 0) {
+			out = append(out, ProcInfo{PID: pid, Name: p.name})
+		}
+	}
+	return out
+}
+
+// resolveClass is the precedence rule between the three ways of deciding what
+// to tunnel. It is the whole contract of WFP mode, kept free of Windows types
+// so it can be tested anywhere:
+//
+//   - WFP off: the port-based mode, unchanged (listed processes, plus
+//     everything when full is set).
+//   - WFP on: only the selected apps; the full tunnel is ignored and the
+//     port-based process list is not consulted. AionWG's own traffic
+//     (self-test) is the one exception: it must keep using the tunnel to test it.
+func resolveClass(
+	wfpOn bool,
+	portClass func() uint8, // listed-process owner class (port-based mode)
+	full bool,
+	wfpClass func() uint8, // selected-app decision
+) (class uint8, fullTunnel bool) {
+	if !wfpOn {
+		return portClass(), full
+	}
+	if c := portClass(); c == classSelf {
+		return c, false
+	}
+	return wfpClass(), false
 }
