@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -42,5 +43,38 @@ func TestSteamMigration(t *testing.T) {
 	}
 	if got := loadSettings().Processes; len(got) != 1 {
 		t.Fatalf("steam re-added: %v", got)
+	}
+}
+
+func TestImportConfigNeverOverwrites(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("APPDATA", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("HOME", home)
+	src := filepath.Join(t.TempDir(), "profile.conf")
+	write := func(addr string) {
+		t.Helper()
+		conf := strings.Replace(sampleConf, "10.66.66.2/24", addr, 1)
+		if err := os.WriteFile(src, []byte(conf), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("10.66.66.2/24")
+	if _, err := importConfig(src); err != nil {
+		t.Fatal(err)
+	}
+	write("10.66.66.9/24")
+	if _, err := importConfig(src); err == nil {
+		t.Fatal("second import with the same name must fail")
+	}
+	c, err := readConfig("profile.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := c.Addr(false); a.String() != "10.66.66.2" {
+		t.Fatalf("original profile was overwritten: %v", a)
+	}
+	if got := listConfigs(); len(got) != 1 {
+		t.Fatalf("configs: %v", got)
 	}
 }

@@ -4,7 +4,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -124,7 +126,22 @@ func importConfig(path string) (string, error) {
 	if !strings.EqualFold(filepath.Ext(name), ".conf") {
 		name += ".conf"
 	}
-	if err := os.WriteFile(filepath.Join(configDir(), name), b, 0o600); err != nil {
+	// O_EXCL: never overwrite a profile (and its private key) with another file
+	// of the same name; the check and the create are one atomic step.
+	f, err := os.OpenFile(filepath.Join(configDir(), name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, fs.ErrExist) {
+		return "", fmt.Errorf("já existe uma config chamada %s; remova-a ([d]) ou renomeie o arquivo", name)
+	}
+	if err != nil {
+		return "", err
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(f.Name())
 		return "", err
 	}
 	return name, nil
