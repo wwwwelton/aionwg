@@ -7,6 +7,7 @@ package main
 // default mode relies on.
 
 import (
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -295,4 +296,91 @@ func resolveClass(
 		return c, false
 	}
 	return wfpClass(), false
+}
+
+// appEntry is one row of the WFP app picker.
+type appEntry struct {
+	Name     string // executable name, as Windows reports it
+	Selected bool
+	Running  bool // false: picked earlier but not running now
+}
+
+// buildAppList merges the running executables with the already selected ones.
+// A selected app that is not running stays listed, otherwise closing it would
+// silently drop it from the selection. self (AionWG's own executable) is never
+// offered. Names compare case-insensitively and keep the spelling Windows
+// reported. Selected apps come first, then alphabetical.
+func buildAppList(running, selected []string, self string) []appEntry {
+	self = strings.ToLower(self)
+	byKey := map[string]*appEntry{}
+	add := func(name string, isRunning, isSelected bool) {
+		name = strings.TrimSpace(name)
+		key := strings.ToLower(name)
+		if key == "" || key == self {
+			return
+		}
+		e := byKey[key]
+		if e == nil {
+			e = &appEntry{Name: name}
+			byKey[key] = e
+		}
+		if isRunning {
+			if !e.Running {
+				e.Name = name // the first live spelling replaces a stored one; later ones never flip it
+			}
+			e.Running = true
+		}
+		if isSelected {
+			e.Selected = true
+		}
+	}
+	for _, n := range selected {
+		add(n, false, true)
+	}
+	for _, n := range running {
+		add(n, true, false)
+	}
+	out := make([]appEntry, 0, len(byKey))
+	for _, e := range byKey {
+		out = append(out, *e)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Selected != out[j].Selected {
+			return out[i].Selected
+		}
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
+	return out
+}
+
+// toggleApp returns a new selection with name added or removed. It never
+// modifies selected: Settings lives in a Bubble Tea model that is copied by value.
+func toggleApp(selected []string, name string) []string {
+	key := strings.ToLower(strings.TrimSpace(name))
+	out := make([]string, 0, len(selected)+1)
+	removed := false
+	for _, s := range selected {
+		if strings.ToLower(strings.TrimSpace(s)) == key {
+			removed = true
+			continue
+		}
+		out = append(out, s)
+	}
+	if !removed && key != "" {
+		out = append(out, strings.TrimSpace(name))
+	}
+	return out
+}
+
+// clampCursor keeps a list cursor inside [0, n-1] (0 for an empty list). The
+// picker list changes under the cursor as processes start and exit, so the
+// cursor must be re-limited whenever it is refreshed.
+func clampCursor(cursor, n int) int {
+	if n <= 0 || cursor < 0 {
+		return 0
+	}
+	if cursor >= n {
+		return n - 1
+	}
+	return cursor
 }

@@ -250,3 +250,64 @@ func TestResolveClassOffNeverRunsWFPDecision(t *testing.T) {
 		func() uint8 { return classNone }, false,
 		func() uint8 { t.Fatal("WFP decision evaluated while WFP is off"); return classNone })
 }
+
+func TestBuildAppList(t *testing.T) {
+	got := buildAppList(
+		[]string{"chrome.exe", "Discord.exe", "AionWG.exe", "", "  ", "CHROME.EXE", "notepad.exe"},
+		[]string{"discord.exe", "Gone.exe"}, // Gone.exe is selected but no longer running
+		"aionwg.exe")
+
+	want := []appEntry{
+		{"Discord.exe", true, true},  // selected first; the live spelling wins over the stored one
+		{"Gone.exe", true, false},    // selected but closed: must stay listed
+		{"chrome.exe", false, true},  // "CHROME.EXE" does not create a duplicate
+		{"notepad.exe", false, true}, // AionWG itself and blank names are never offered
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %+v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("row %d: got %+v, want %+v (all: %+v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestToggleAppIsCaseInsensitiveAndDoesNotMutate(t *testing.T) {
+	orig := []string{"Discord.exe", "chrome.exe"}
+	snapshot := append([]string(nil), orig...)
+
+	removed := toggleApp(orig, "DISCORD.EXE")
+	if len(removed) != 1 || removed[0] != "chrome.exe" {
+		t.Fatalf("remove: %v", removed)
+	}
+	added := toggleApp(orig, " notepad.exe ")
+	if len(added) != 3 || added[2] != "notepad.exe" {
+		t.Fatalf("add (must trim): %v", added)
+	}
+	if got := toggleApp(orig, "  "); len(got) != 2 {
+		t.Fatalf("blank name must not be added: %v", got)
+	}
+	for i := range orig {
+		if orig[i] != snapshot[i] || len(orig) != len(snapshot) {
+			t.Fatalf("input was mutated: %v", orig)
+		}
+	}
+}
+
+// The picker list shrinks as processes exit; a stale cursor would make the
+// next keypress act on nothing.
+func TestClampCursor(t *testing.T) {
+	for _, c := range []struct{ cursor, n, want int }{
+		{0, 0, 0},   // empty list
+		{5, 0, 0},   // stale cursor, list emptied
+		{-1, 3, 0},  // never negative
+		{2, 3, 2},   // in range is untouched
+		{3, 3, 2},   // one past the end
+		{40, 10, 9}, // list shrank a lot
+	} {
+		if got := clampCursor(c.cursor, c.n); got != c.want {
+			t.Errorf("clampCursor(%d,%d) = %d, want %d", c.cursor, c.n, got, c.want)
+		}
+	}
+}

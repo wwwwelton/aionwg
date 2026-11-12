@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -64,6 +66,7 @@ const (
 	modePing
 	modeUDPCopies
 	modeDelete
+	modeWFPApps
 )
 
 type (
@@ -104,6 +107,9 @@ type model struct {
 	histPing []float64
 
 	logs []string
+
+	running   []string // executables seen by the last scan, while the WFP picker is open
+	appCursor int
 
 	showDiag bool
 	prevDiag Diag
@@ -156,6 +162,7 @@ func connectCmd(name string, s Settings) tea.Cmd {
 			UDPDuplicate: s.UDPDuplicate, UDPCopies: s.UDPCopies, UDPForce: s.UDPForce,
 			UDPNewestOut: s.UDPNewestOut, UDPNewestIn: s.UDPNewestIn,
 			FullTunnel: s.FullTunnel, NoDNS: s.NoDNS,
+			WFP: s.WFP, WFPApps: s.WFPApps,
 		}, func(f string, a ...any) {
 			queueProgramLog(logMsg(fmt.Sprintf(f, a...)))
 		})
@@ -210,6 +217,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.histPing = pushHist(m.histPing, 0)
 			}
+		}
+		if m.mode == modeWFPApps {
+			m.running = ListAllProcesses() // only while the picker is open
+			m.appCursor = clampCursor(m.appCursor, len(m.pickerList()))
 		}
 		return m, tick()
 
@@ -424,6 +435,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.configs) > 0 && m.eng == nil {
 				m.mode = modeDelete
 			}
+		case "w":
+			m.settings.WFP = !m.settings.WFP
+			_ = saveSettings(m.settings)
+			if m.eng != nil {
+				m.eng.SetWFP(m.settings.WFP)
+			}
+			if !m.settings.WFP {
+				m.log("WFP desligado: volta o modo anterior (só jogo / sistema inteiro)")
+			} else if len(m.settings.WFPApps) == 0 {
+				// WFP with nothing selected tunnels nothing; make the user choose now.
+				m.log("WFP ligado, mas nenhum app marcado: escolha os apps na lista")
+				m.openPicker()
+			} else {
+				m.log("WFP ligado: só %d app(s) marcado(s) passam pelo túnel; ignora porta e sistema inteiro", len(m.settings.WFPApps))
+			}
+		case "l":
+			m.openPicker()
 		}
 		return m, nil
 	}
@@ -431,6 +459,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.mode == modeWFPApps {
+		return m.updatePicker(msg)
+	}
 	if m.mode == modeDelete {
 		if msg.String() == "y" || msg.String() == "s" {
 			name := m.configs[m.cursor]
@@ -599,8 +630,9 @@ func sparkline(h []float64, width int, color lipgloss.Color) string {
 }
 
 // processSummary groups tunnelled processes by name ("steamwebhelper.exe ×6")
-// and warns when the game itself is not running.
-func processSummary(ps []ProcInfo) string {
+// and, unless warnGame is false, warns when the game itself is not running.
+// WFP mode tunnels arbitrary apps, so there "the game is not open" is meaningless.
+func processSummary(ps []ProcInfo, warnGame bool) string {
 	order := []string{}
 	count := map[string]int{}
 	pid := map[string]uint32{}
@@ -629,7 +661,7 @@ func processSummary(ps []ProcInfo) string {
 	if len(parts) > 0 {
 		out = lipgloss.NewStyle().Foreground(cGreen).Render(strings.Join(parts, ", "))
 	}
-	if !game {
+	if warnGame && !game {
 		warn := lipgloss.NewStyle().Foreground(cYellow).Render("AION 2 não está aberto — abra o jogo")
 		if out != "" {
 			return warn + sDim.Render("  · ") + out
@@ -640,6 +672,14 @@ func processSummary(ps []ProcInfo) string {
 }
 
 func modeStatus(s Stats) string {
+	if s.WFPOn {
+		out := lipgloss.NewStyle().Foreground(cGreen).Render("WFP") +
+			sDim.Render(" · só os apps marcados ([l]) · ignora porta e sistema inteiro")
+		if !s.WFPSocket {
+			out += lipgloss.NewStyle().Foreground(cYellow).Render(" · camada SOCKET indisponível: usando a tabela do sistema")
+		}
+		return out
+	}
 	if !s.FullTunnel {
 		return lipgloss.NewStyle().Foreground(cDown).Render("só jogo") + sDim.Render("  · processos da lista [p]")
 	}
@@ -658,6 +698,9 @@ func modeStatus(s Stats) string {
 }
 
 func flowStatus(s Stats) string {
+	if s.WFPOn {
+		return fmt.Sprintf("%d fluxos dos apps WFP no túnel", s.GameFlows)
+	}
 	if s.FullTunnel {
 		return fmt.Sprintf("%d fluxos no túnel (%d do jogo)", s.Flows, s.GameFlows)
 	}
@@ -719,6 +762,9 @@ func (m model) View() string {
 	if m.settings.FullTunnel {
 		modeBadge = lipgloss.NewStyle().Foreground(lipgloss.Color("#000000")).Background(cUp).Padding(0, 1).Render("SISTEMA INTEIRO")
 	}
+	if m.settings.WFP {
+		modeBadge = lipgloss.NewStyle().Foreground(lipgloss.Color("#000000")).Background(cGreen).Padding(0, 1).Render("WFP")
+	}
 	title += " " + modeBadge
 	gap := w - lipgloss.Width(title) - lipgloss.Width(status) - 1
 	if gap < 1 {
@@ -739,12 +785,19 @@ func (m model) View() string {
 			}
 			hs = lipgloss.NewStyle().Foreground(c).Render(fmt.Sprintf("há %s", ago))
 		}
-		procs := processSummary(s.Procs)
+		procs := processSummary(s.Procs, !s.WFPOn)
+		procLabel := "Processo"
+		if s.WFPOn {
+			procLabel = "Apps WFP"
+			if procs == "" {
+				procs = lipgloss.NewStyle().Foreground(cYellow).Render("nenhum app marcado em execução ([l] escolhe)")
+			}
+		}
 		stat = append(stat,
 			row("Config", sBold.Render(m.engName)+sDim.Render("  · ativo há "+time.Since(m.since).Round(time.Second).String())),
 			row("Endpoint", s.Endpoint+sDim.Render("   túnel ")+s.TunnelAddr),
 			row("Handshake", hs),
-			row("Processo", procs),
+			row(procLabel, procs),
 			row("Modo", modeStatus(s)),
 			row("Conexões", flowStatus(s)),
 			row("Espelho DPS", mirrorStatus(s)),
@@ -767,6 +820,9 @@ func (m model) View() string {
 		md := "só jogo  ([s] muda para sistema inteiro)"
 		if m.settings.FullTunnel {
 			md = "sistema inteiro  ([s] muda para só jogo)"
+		}
+		if m.settings.WFP {
+			md = fmt.Sprintf("WFP · %d app(s) marcados ([l] escolhe, [w] desliga) · ignora porta e sistema", len(m.settings.WFPApps))
 		}
 		stat = append(stat, row("Modo", sDim.Render(md)))
 	}
@@ -922,6 +978,8 @@ func (m model) View() string {
 	case modeDelete:
 		parts = append(parts, lipgloss.NewStyle().Foreground(cRed).Bold(true).Render(
 			fmt.Sprintf("Remover %s? [s/y] sim  [qualquer tecla] não", m.configs[m.cursor])))
+	case modeWFPApps:
+		parts = append(parts, m.wfpPicker(w))
 	default:
 		k := func(key, desc string) string { return sKey.Render("["+key+"]") + " " + sDim.Render(desc) }
 		act := "conectar"
@@ -930,10 +988,106 @@ func (m model) View() string {
 		}
 		parts = append(parts, lipgloss.NewStyle().Width(w).Render(strings.Join([]string{
 			k("Enter", act), k("i", "importar"), k("↑↓", "escolher"), k("p", "processos"),
+			k("w", "WFP"), k("l", "apps WFP"),
 			k("s", "sistema inteiro"), k("n", "DNS túnel"), k("m", "espelho DPS"), k("u", "dup UDP"), k("r", "proporcao"), k("f", "forcar UDP"), k("o", "envio recente"), k("a", "chegada recente"), k("x", "autoteste"), k("g", "diagnóstico"), k("e", "exportar p/ WG oficial"), k("t", "alvo do ping"), k("d", "remover"), k("q", "sair"),
 		}, "  ")))
 	}
 	return strings.Join(parts, "\n")
+}
+
+// openPicker opens the app list with a fresh process scan. The receiver is a
+// pointer on purpose: Update has a value receiver, so a value method would
+// change a copy and the picker would never open.
+func (m *model) openPicker() {
+	m.running = ListAllProcesses()
+	m.appCursor = 0
+	m.mode = modeWFPApps
+}
+
+// wfpPickerRows is how many apps the picker shows at once; the rest scroll.
+const wfpPickerRows = 10
+
+// pickerList is the picker content: running apps merged with the selection.
+func (m model) pickerList() []appEntry {
+	self := "aionwg.exe"
+	if exe, err := os.Executable(); err == nil {
+		self = filepath.Base(exe)
+	}
+	return buildAppList(m.running, m.settings.WFPApps, self)
+}
+
+// wfpPicker renders the scrollable app list, keeping the cursor visible.
+func (m model) wfpPicker(w int) string {
+	list := m.pickerList()
+	cur := clampCursor(m.appCursor, len(list))
+	top := 0
+	if cur >= wfpPickerRows {
+		top = cur - wfpPickerRows + 1
+	}
+	end := top + wfpPickerRows
+	if end > len(list) {
+		end = len(list)
+	}
+	var lines []string
+	if len(list) == 0 {
+		lines = append(lines, sDim.Render("(nenhum processo encontrado)"))
+	}
+	for i := top; i < end; i++ {
+		e := list[i]
+		mark := "[ ]"
+		if e.Selected {
+			mark = lipgloss.NewStyle().Foreground(cGreen).Bold(true).Render("[x]")
+		}
+		name := e.Name
+		if !e.Running {
+			name += sDim.Render("  (fechado)")
+		}
+		cursor := "  "
+		if i == cur {
+			cursor = sSel.Render("▸ ")
+			name = sSel.Render(e.Name)
+			if !e.Running {
+				name += sDim.Render("  (fechado)")
+			}
+		}
+		lines = append(lines, cursor+mark+" "+name)
+	}
+	title := fmt.Sprintf("Apps pelo WFP — %d marcado(s) de %d  [↑↓] mover  [espaço] marcar  [Esc/Enter] fechar", len(m.settings.WFPApps), len(list))
+	return sBox.Width(w - 4).Render(sBold.Render(title) + "\n" + strings.Join(lines, "\n"))
+}
+
+// updatePicker handles keys while the app picker is open. Toggling applies to
+// the running engine at once and is saved, so the choice survives a restart.
+func (m model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	list := m.pickerList()
+	switch msg.String() {
+	case "esc", "enter", "l":
+		m.mode = modeNormal
+	case "up", "k":
+		if m.appCursor > 0 {
+			m.appCursor--
+		}
+	case "down", "j":
+		if m.appCursor < len(list)-1 {
+			m.appCursor++
+		}
+	case " ":
+		if m.appCursor >= 0 && m.appCursor < len(list) {
+			m.settings.WFPApps = toggleApp(m.settings.WFPApps, list[m.appCursor].Name)
+			_ = saveSettings(m.settings)
+			if m.eng != nil {
+				m.eng.SetWFPApps(m.settings.WFPApps)
+			}
+			// the toggled app moves (selected ones sort first): keep the cursor on it
+			for i, e := range m.pickerList() {
+				if strings.EqualFold(e.Name, list[m.appCursor].Name) {
+					m.appCursor = i
+					break
+				}
+			}
+		}
+	}
+	return m, nil
 }
 
 func runTUI() error {
