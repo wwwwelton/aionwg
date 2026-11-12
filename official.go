@@ -181,6 +181,9 @@ func mergeSorted(ps []netip.Prefix) []netip.Prefix {
 }
 
 // RenderOfficial rewrites a wg-quick config for the official client.
+// The computed allowed list replaces AllowedIPs of the first [Peer] only:
+// the same prefixes on two peers make WireGuard hand the route to the last
+// one, so other peers keep the AllowedIPs they were configured with.
 func RenderOfficial(raw, title string, allowed []netip.Prefix, keepDNS bool) string {
 	var ss []string
 	for _, p := range allowed {
@@ -189,17 +192,21 @@ func RenderOfficial(raw, title string, allowed []netip.Prefix, keepDNS bool) str
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Gerado pelo AionWG — %s\n", title)
 	section := ""
+	peers := 0
 	for _, line := range strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n") {
 		t := strings.TrimSpace(line)
 		if strings.HasPrefix(t, "[") {
 			section = strings.ToLower(strings.Trim(t, "[] "))
+			if section == "peer" {
+				peers++
+			}
 		}
 		k, _, _ := strings.Cut(t, "=")
 		k = strings.ToLower(strings.TrimSpace(k))
 		if section == "interface" && k == "dns" && !keepDNS {
 			continue
 		}
-		if section == "peer" && k == "allowedips" {
+		if section == "peer" && k == "allowedips" && peers == 1 {
 			b.WriteString("AllowedIPs = " + strings.Join(ss, ", ") + "\n")
 			continue
 		}

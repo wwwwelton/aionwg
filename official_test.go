@@ -37,6 +37,26 @@ func TestFullTunnelAllowed(t *testing.T) {
 	t.Logf("%d prefixes", len(al))
 }
 
+// The same AllowedIPs on two peers make WireGuard give the route to the last
+// one, so only the first peer gets the computed list.
+func TestRenderOfficialDoesNotDuplicateRoutesAcrossPeers(t *testing.T) {
+	raw := sampleConf + "\n[Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\nEndpoint = 203.0.113.11:51820\nAllowedIPs = 192.168.50.0/24\n"
+	out := RenderOfficial(raw, "teste", []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}, true)
+	c, err := ParseConfig(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Peers) != 2 {
+		t.Fatalf("peers: %d", len(c.Peers))
+	}
+	if got := c.Peers[0].AllowedIPs; len(got) != 1 || got[0].String() != "203.0.113.0/24" {
+		t.Fatalf("first peer: %v", got)
+	}
+	if got := c.Peers[1].AllowedIPs; len(got) != 1 || got[0].String() != "192.168.50.0/24" {
+		t.Fatalf("second peer lost its own AllowedIPs: %v", got)
+	}
+}
+
 // Writes the user's official-client configs when AIONWG_GEN is set.
 func TestGenerateOfficial(t *testing.T) {
 	src := os.Getenv("AIONWG_GEN")
