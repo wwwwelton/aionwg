@@ -26,26 +26,6 @@ const (
 	udpTableOwnerPid    = 1
 )
 
-// Port owner classes.
-const (
-	classNone uint8 = iota // not in the list
-	classGame              // AION 2 (and anything listed that is not Steam)
-	classApp               // Steam (tunnelled, but not mirrored / not "the game")
-	classSelf              // AionWG itself (self-test traffic)
-)
-
-func classOfName(lower string) uint8 {
-	if strings.HasPrefix(lower, "steam") {
-		return classApp
-	}
-	return classGame
-}
-
-type portKey struct {
-	proto uint8
-	port  uint16
-}
-
 type ownerEntry struct {
 	class   uint8
 	expires time.Time
