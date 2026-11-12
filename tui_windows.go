@@ -1,0 +1,955 @@
+//go:build windows
+
+package main
+
+import (
+	"fmt"
+	"net"
+	"net/netip"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+)
+
+var program *tea.Program
+
+// Bubble Tea's Program.Send may block until Update consumes the message.
+// Never call it synchronously from an Engine callback invoked by Update
+// (notably the Mirror toggle), or the UI can deadlock itself.
+var programLogs = make(chan logMsg, 256)
+
+func queueProgramLog(msg logMsg) {
+	enqueueProgramLog(programLogs, msg)
+}
+
+func enqueueProgramLog(queue chan<- logMsg, msg logMsg) {
+	select {
+	case queue <- msg:
+	default: // bounded: drop diagnostic logs rather than freeze packet/UI threads
+	}
+}
+
+// ---------------------------------------------------------------- styles
+
+var (
+	cAccent = lipgloss.Color("#B48CFF")
+	cGreen  = lipgloss.Color("#5FD787")
+	cYellow = lipgloss.Color("#FFD75F")
+	cRed    = lipgloss.Color("#FF5F5F")
+	cDim    = lipgloss.Color("#7A7A8C")
+	cUp     = lipgloss.Color("#FF9F5F")
+	cDown   = lipgloss.Color("#5FAFFF")
+
+	sTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(cAccent).Padding(0, 1)
+	sBox   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cAccent).Padding(0, 1)
+	sLabel = lipgloss.NewStyle().Foreground(cDim)
+	sBold  = lipgloss.NewStyle().Bold(true)
+	sDim   = lipgloss.NewStyle().Foreground(cDim)
+	sSel   = lipgloss.NewStyle().Foreground(cAccent).Bold(true)
+	sKey   = lipgloss.NewStyle().Foreground(cAccent).Bold(true)
+)
+
+// ---------------------------------------------------------------- model
+
+type mode int
+
+const (
+	modeNormal mode = iota
+	modeImport
+	modeProcs
+	modePing
+	modeUDPCopies
+	modeDelete
+)
+
+type (
+	tickMsg      time.Time
+	logMsg       string
+	connectedMsg struct {
+		eng  *Engine
+		name string
+		err  error
+	}
+	testMsg     TestResult
+	testDoneMsg struct{}
+)
+
+type model struct {
+	settings Settings
+	configs  []string
+	cursor   int
+	mode     mode
+	input    textinput.Model
+
+	eng        *Engine
+	engName    string
+	connecting bool
+	since      time.Time
+
+	stats    Stats
+	prev     Stats
+	prevAt   time.Time
+	upRate   float64 // bytes/s, everything in the tunnel (inner)
+	downRate float64
+	gUpRate  float64 // bytes/s, game only
+	gDnRate  float64
+	wgRxRate float64
+	wgTxRate float64
+	histUp   []float64
+	histDown []float64
+	histPing []float64
+
+	logs []string
+
+	showDiag bool
+	prevDiag Diag
+	diagRate Diag // per second
+	testing  bool
+	tests    []TestResult
+	width    int
+	height   int
+}
+
+func newModel() model {
+	ti := textinput.New()
+	ti.CharLimit = 1024
+	ti.Width = 60
+	m := model{settings: loadSettings(), input: ti}
+	m.configs = listConfigs()
+	for i, c := range m.configs {
+		if c == m.settings.LastConfig {
+			m.cursor = i
+		}
+	}
+	m.log("AionWG pronto. Processos-alvo: %s", strings.Join(m.settings.Processes, ", "))
+	if len(m.configs) == 0 {
+		m.log("Nenhuma config ainda — pressione [i] para importar um .conf do WireGuard")
+	}
+	return m
+}
+
+func (m *model) log(f string, a ...any) {
+	m.logs = append(m.logs, time.Now().Format("15:04:05 ")+fmt.Sprintf(f, a...))
+	if len(m.logs) > 200 {
+		m.logs = m.logs[len(m.logs)-200:]
+	}
+}
+
+func tick() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
+}
+
+func (m model) Init() tea.Cmd { return tea.Batch(tick(), textinput.Blink) }
+
+func connectCmd(name string, s Settings) tea.Cmd {
+	return func() tea.Msg {
+		conf, err := readConfig(name)
+		if err != nil {
+			return connectedMsg{err: err}
+		}
+		eng, err := StartEngine(conf, EngineOptions{
+			Processes: s.Processes, PingTarget: s.PingTarget, Mirror: s.Mirror,
+			UDPDuplicate: s.UDPDuplicate, UDPCopies: s.UDPCopies, UDPForce: s.UDPForce,
+			UDPNewestOut: s.UDPNewestOut, UDPNewestIn: s.UDPNewestIn,
+			FullTunnel: s.FullTunnel, NoDNS: s.NoDNS,
+		}, func(f string, a ...any) {
+			queueProgramLog(logMsg(fmt.Sprintf(f, a...)))
+		})
+		return connectedMsg{eng: eng, name: name, err: err}
+	}
+}
+
+func pushHist(h []float64, v float64) []float64 {
+	h = append(h, v)
+	if len(h) > 60 {
+		h = h[len(h)-60:]
+	}
+	return h
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
+		return m, nil
+
+	case tickMsg:
+		if m.eng != nil {
+			now := time.Now()
+			s := m.eng.Stats()
+			if !m.prevAt.IsZero() {
+				dt := now.Sub(m.prevAt).Seconds()
+				if dt > 0 {
+					m.upRate = float64(s.Up-m.prev.Up) / dt
+					m.downRate = float64(s.Down-m.prev.Down) / dt
+					m.gUpRate = float64(s.GameUp-m.prev.GameUp) / dt
+					m.gDnRate = float64(s.GameDown-m.prev.GameDown) / dt
+					m.wgTxRate = float64(s.WGTx-m.prev.WGTx) / dt
+					m.wgRxRate = float64(s.WGRx-m.prev.WGRx) / dt
+				}
+			}
+			d, pd := s.Diag, m.prevDiag
+			m.diagRate = Diag{
+				Captured: d.Captured - pd.Captured, Injected: d.Injected - pd.Injected,
+				InNoNAT: d.InNoNAT - pd.InNoNAT, InjectErr: d.InjectErr - pd.InjectErr,
+				TunDrop: d.TunDrop - pd.TunDrop, Segmented: d.Segmented - pd.Segmented,
+				ICMPErr: d.ICMPErr - pd.ICMPErr, DNSQ: d.DNSQ - pd.DNSQ, DNSA: d.DNSA - pd.DNSA,
+				TableDumps: d.TableDumps - pd.TableDumps, V6Blocked: d.V6Blocked - pd.V6Blocked,
+			}
+			m.prevDiag = d
+			m.prev, m.prevAt, m.stats = s, now, s
+			m.histUp = pushHist(m.histUp, m.upRate)
+			m.histDown = pushHist(m.histDown, m.downRate)
+			p := bestPing(s)
+			if p.OK {
+				m.histPing = pushHist(m.histPing, float64(p.RTT.Microseconds())/1000)
+			} else {
+				m.histPing = pushHist(m.histPing, 0)
+			}
+		}
+		return m, tick()
+
+	case testMsg:
+		r := TestResult(msg)
+		m.tests = append(m.tests, r)
+		st := "OK"
+		if !r.OK {
+			st = "ERRO"
+		}
+		m.log("Teste %s: %s — %s (%d ms)", r.Name, st, r.Detail, r.Dur.Milliseconds())
+		return m, nil
+
+	case testDoneMsg:
+		m.testing = false
+		m.log("Autoteste concluído")
+		return m, nil
+
+	case logMsg:
+		m.log("%s", string(msg))
+		return m, nil
+
+	case connectedMsg:
+		m.connecting = false
+		if msg.err != nil {
+			m.log("ERRO ao conectar: %v", msg.err)
+			return m, nil
+		}
+		m.eng, m.engName, m.since = msg.eng, msg.name, time.Now()
+		m.prevAt, m.histUp, m.histDown, m.histPing = time.Time{}, nil, nil, nil
+		m.settings.LastConfig = msg.name
+		_ = saveSettings(m.settings)
+		m.log("Conectado com %s — só o tráfego do AION 2 passa pelo túnel", msg.name)
+		return m, nil
+
+	case tea.KeyMsg:
+		if m.mode != modeNormal {
+			return m.updateInput(msg)
+		}
+		switch msg.String() {
+		case "ctrl+c", "q":
+			if m.eng != nil {
+				m.eng.Close()
+			}
+			return m, tea.Quit
+		case "up", "k":
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		case "down", "j":
+			if m.cursor < len(m.configs)-1 {
+				m.cursor++
+			}
+		case "enter", "c":
+			if m.connecting {
+				return m, nil
+			}
+			if m.eng != nil {
+				m.eng.Close()
+				m.eng = nil
+				m.log("Desconectado")
+				return m, nil
+			}
+			if len(m.configs) == 0 {
+				m.log("Importe uma config primeiro ([i])")
+				return m, nil
+			}
+			m.connecting = true
+			name := m.configs[m.cursor]
+			m.log("Conectando com %s…", name)
+			return m, connectCmd(name, m.settings)
+		case "i":
+			m.mode = modeImport
+			m.input.SetValue("")
+			m.input.Placeholder = `C:\Users\voce\Downloads\vps.conf  (pode arrastar o arquivo para cá)`
+			m.input.Focus()
+		case "p":
+			m.mode = modeProcs
+			m.input.SetValue(strings.Join(m.settings.Processes, ", "))
+			m.input.Placeholder = "Aion2.exe, Aion2-Win64-Shipping.exe"
+			m.input.Focus()
+		case "t":
+			m.mode = modePing
+			m.input.SetValue(m.settings.PingTarget)
+			m.input.Placeholder = "vazio = automático (gateway do túnel)"
+			m.input.Focus()
+		case "s":
+			m.settings.FullTunnel = !m.settings.FullTunnel
+			_ = saveSettings(m.settings)
+			if m.eng != nil {
+				m.eng.SetFullTunnel(m.settings.FullTunnel)
+			}
+			if m.settings.FullTunnel {
+				m.log("Modo SISTEMA INTEIRO: todo o tráfego do PC passa pelo túnel (rede local continua direta)")
+			} else {
+				m.log("Modo SÓ JOGO: apenas os processos da lista [p] passam pelo túnel")
+			}
+			if m.eng != nil {
+				m.log("Conexões já abertas podem cair uma vez e reconectar — é normal")
+			}
+		case "n":
+			m.settings.NoDNS = !m.settings.NoDNS
+			_ = saveSettings(m.settings)
+			if m.eng != nil {
+				m.eng.SetNoDNS(m.settings.NoDNS)
+			}
+			if m.settings.NoDNS {
+				m.log("DNS pelo túnel DESLIGADO (sistema inteiro usa o DNS normal do Windows)")
+			} else {
+				m.log("DNS pelo túnel LIGADO (sistema inteiro usa o DNS da config)")
+			}
+		case "g":
+			m.showDiag = !m.showDiag
+		case "e":
+			if len(m.configs) == 0 {
+				return m, nil
+			}
+			name := m.configs[m.cursor]
+			var obs, eps []netip.Addr
+			if m.eng != nil && name == m.engName {
+				obs, eps = m.eng.ObservedRemotes(), m.eng.EndpointAddrs()
+			} else if c, err := readConfig(name); err == nil {
+				for _, p := range c.Peers {
+					if ap, err := ResolveEndpoint(p.Endpoint); err == nil {
+						eps = append(eps, ap.Addr())
+					}
+				}
+			}
+			dir, n, err := exportOfficial(name, obs, eps)
+			if err != nil {
+				m.log("ERRO ao exportar: %v", err)
+			} else {
+				m.log("Configs p/ WireGuard oficial salvas em %s (-sistema.conf e -jogo.conf, %d IPs do jogo/Steam incluídos)", dir, n)
+				if n == 0 {
+					m.log("Dica: conecte, jogue um pouco e aperte [e] de novo para incluir os IPs reais dos servidores")
+				}
+			}
+		case "x":
+			if m.eng == nil {
+				m.log("Conecte primeiro para rodar o autoteste")
+				return m, nil
+			}
+			if m.testing {
+				return m, nil
+			}
+			m.testing, m.tests = true, nil
+			m.log("Autoteste iniciado…")
+			dns, vpn := "", ""
+			if c, err := readConfig(m.engName); err == nil {
+				if d, ok := c.DNSFor(false); ok {
+					dns = d.String()
+				}
+			}
+			if ep := m.stats.Endpoint; ep != "" {
+				if h, _, err := net.SplitHostPort(ep); err == nil {
+					vpn = h
+				}
+			}
+			return m, func() tea.Msg {
+				runSelfTest(dns, vpn, func(r TestResult) { program.Send(testMsg(r)) })
+				return testDoneMsg{}
+			}
+		case "u":
+			m.settings.UDPDuplicate = !m.settings.UDPDuplicate
+			_ = saveSettings(m.settings)
+			if m.eng != nil {
+				m.eng.SetUDPDuplicate(m.settings.UDPDuplicate)
+			}
+			if m.settings.UDPDuplicate {
+				m.log("UDP %d:1 LIGADO: original no WireGuard e %d copia(s) direta(s); nao garante ping menor.", normalizeUDPCopies(m.settings.UDPCopies), normalizeUDPCopies(m.settings.UDPCopies))
+			} else {
+				m.log("UDP 1:1 DESLIGADO: sem copias extras")
+			}
+		case "r":
+			m.mode = modeUDPCopies
+			m.input.SetValue(strconv.Itoa(normalizeUDPCopies(m.settings.UDPCopies)))
+			m.input.Placeholder = "1..8 copias extras por pacote UDP original"
+			m.input.Focus()
+		case "f":
+			m.settings.UDPForce = !m.settings.UDPForce
+			_ = saveSettings(m.settings)
+			if m.eng != nil {
+				m.eng.SetUDPForce(m.settings.UDPForce)
+			}
+			m.log("Forcar UDP para copiar mesmo fora de AllowedIPs: %v (somente jogo; nao converte TCP em UDP)", m.settings.UDPForce)
+		case "o":
+			m.settings.UDPNewestOut = !m.settings.UDPNewestOut
+			_ = saveSettings(m.settings)
+			if m.eng != nil {
+				m.eng.SetUDPNewestOut(m.settings.UDPNewestOut)
+			}
+			m.log("Reordenacao de ENVIO UDP do jogo (mais novo primeiro): %v. Pode causar perda/latencia.", m.settings.UDPNewestOut)
+		case "a":
+			m.settings.UDPNewestIn = !m.settings.UDPNewestIn
+			_ = saveSettings(m.settings)
+			if m.eng != nil {
+				m.eng.SetUDPNewestIn(m.settings.UDPNewestIn)
+			}
+			m.log("Reordenacao de CHEGADA UDP do jogo (mais novo primeiro): %v. Pode quebrar sequencia do jogo.", m.settings.UDPNewestIn)
+		case "m":
+			m.settings.Mirror = !m.settings.Mirror
+			_ = saveSettings(m.settings)
+			if m.eng != nil {
+				m.eng.SetMirror(m.settings.Mirror)
+			}
+			if m.settings.Mirror {
+				m.log("Espelho para DPS meter LIGADO — no meter escolha o adaptador AionWG-Meter (ou o de loopback do Npcap)")
+			} else {
+				m.log("Espelho para DPS meter desligado")
+			}
+		case "d":
+			if len(m.configs) > 0 && m.eng == nil {
+				m.mode = modeDelete
+			}
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.mode == modeDelete {
+		if msg.String() == "y" || msg.String() == "s" {
+			name := m.configs[m.cursor]
+			if err := deleteConfig(name); err != nil {
+				m.log("ERRO: %v", err)
+			} else {
+				m.log("Config %s removida", name)
+			}
+			m.configs = listConfigs()
+			if m.cursor >= len(m.configs) && m.cursor > 0 {
+				m.cursor--
+			}
+		}
+		m.mode = modeNormal
+		return m, nil
+	}
+	switch msg.String() {
+	case "esc":
+		m.mode = modeNormal
+		m.input.Blur()
+		return m, nil
+	case "enter":
+		v := strings.TrimSpace(m.input.Value())
+		switch m.mode {
+		case modeImport:
+			name, err := importConfig(v)
+			if err != nil {
+				m.log("ERRO ao importar: %v", err)
+			} else {
+				m.log("Config importada: %s", name)
+				m.configs = listConfigs()
+				for i, c := range m.configs {
+					if c == name {
+						m.cursor = i
+					}
+				}
+			}
+		case modeProcs:
+			var procs []string
+			for _, p := range strings.Split(v, ",") {
+				if p = strings.TrimSpace(p); p != "" {
+					procs = append(procs, p)
+				}
+			}
+			if len(procs) == 0 {
+				procs = defaultProcesses
+			}
+			m.settings.Processes = procs
+			_ = saveSettings(m.settings)
+			if m.eng != nil {
+				m.eng.SetProcesses(procs)
+			}
+			m.log("Processos-alvo: %s", strings.Join(procs, ", "))
+		case modeUDPCopies:
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 || n > udpCopiesMax {
+				m.log("Numero invalido: use de 1 a %d copias UDP extras por original", udpCopiesMax)
+				return m, nil
+			}
+			m.settings.UDPCopies = n
+			_ = saveSettings(m.settings)
+			if m.eng != nil {
+				m.eng.SetUDPCopies(n)
+			}
+			m.log("UDP configurado como %d:1 (%d copias extras + original; conexao direta)", n, n)
+		case modePing:
+			m.settings.PingTarget = v
+			_ = saveSettings(m.settings)
+			m.log("Alvo de ping salvo (vale na próxima conexão)")
+		}
+		m.mode = modeNormal
+		m.input.Blur()
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
+// ---------------------------------------------------------------- view helpers
+
+func bestPing(s Stats) PingResult {
+	if s.PingGame.OK {
+		return s.PingGame
+	}
+	return s.PingTunnel
+}
+
+func fmtRate(bps float64) string {
+	kb := bps / 1024
+	if kb >= 1024 {
+		return fmt.Sprintf("%.2f MB/s", kb/1024)
+	}
+	return fmt.Sprintf("%.1f KB/s", kb)
+}
+
+func fmtBytes(b uint64) string {
+	f := float64(b)
+	switch {
+	case f >= 1<<30:
+		return fmt.Sprintf("%.2f GB", f/(1<<30))
+	case f >= 1<<20:
+		return fmt.Sprintf("%.1f MB", f/(1<<20))
+	case f >= 1<<10:
+		return fmt.Sprintf("%.1f KB", f/(1<<10))
+	}
+	return fmt.Sprintf("%d B", b)
+}
+
+func pingColor(ms float64) lipgloss.Color {
+	switch {
+	case ms < 60:
+		return cGreen
+	case ms < 120:
+		return cYellow
+	}
+	return cRed
+}
+
+func fmtPing(p PingResult) string {
+	if p.Target == "" {
+		return sDim.Render("—")
+	}
+	if !p.OK && p.RTT == 0 {
+		return sDim.Render("sem resposta")
+	}
+	ms := float64(p.RTT.Microseconds()) / 1000
+	s := lipgloss.NewStyle().Foreground(pingColor(ms)).Bold(true).Render(fmt.Sprintf("%.0f ms", ms))
+	if !p.OK {
+		s += sDim.Render(" (último)")
+	}
+	if p.Loss > 0 {
+		s += lipgloss.NewStyle().Foreground(cRed).Render(fmt.Sprintf("  perda %.0f%%", p.Loss*100))
+	}
+	return s
+}
+
+var sparkChars = []rune("▁▂▃▄▅▆▇█")
+
+func sparkline(h []float64, width int, color lipgloss.Color) string {
+	if width <= 0 {
+		return ""
+	}
+	if len(h) > width {
+		h = h[len(h)-width:]
+	}
+	max := 0.0
+	for _, v := range h {
+		if v > max {
+			max = v
+		}
+	}
+	var b strings.Builder
+	for i := 0; i < width-len(h); i++ {
+		b.WriteRune(' ')
+	}
+	for _, v := range h {
+		if max <= 0 || v <= 0 {
+			b.WriteRune(' ')
+			continue
+		}
+		idx := int(v / max * float64(len(sparkChars)-1))
+		b.WriteRune(sparkChars[idx])
+	}
+	return lipgloss.NewStyle().Foreground(color).Render(b.String())
+}
+
+// processSummary groups tunnelled processes by name ("steamwebhelper.exe ×6")
+// and warns when the game itself is not running.
+func processSummary(ps []ProcInfo) string {
+	order := []string{}
+	count := map[string]int{}
+	pid := map[string]uint32{}
+	game := false
+	for _, p := range ps {
+		k := strings.ToLower(p.Name)
+		if count[k] == 0 {
+			order = append(order, p.Name)
+			pid[k] = p.PID
+		}
+		count[k]++
+		if !strings.HasPrefix(k, "steam") {
+			game = true
+		}
+	}
+	var parts []string
+	for _, n := range order {
+		k := strings.ToLower(n)
+		if count[k] == 1 {
+			parts = append(parts, fmt.Sprintf("%s (PID %d)", n, pid[k]))
+		} else {
+			parts = append(parts, fmt.Sprintf("%s ×%d", n, count[k]))
+		}
+	}
+	out := ""
+	if len(parts) > 0 {
+		out = lipgloss.NewStyle().Foreground(cGreen).Render(strings.Join(parts, ", "))
+	}
+	if !game {
+		warn := lipgloss.NewStyle().Foreground(cYellow).Render("AION 2 não está aberto — abra o jogo")
+		if out != "" {
+			return warn + sDim.Render("  · ") + out
+		}
+		return warn
+	}
+	return out
+}
+
+func modeStatus(s Stats) string {
+	if !s.FullTunnel {
+		return lipgloss.NewStyle().Foreground(cDown).Render("só jogo") + sDim.Render("  · processos da lista [p]")
+	}
+	out := lipgloss.NewStyle().Foreground(cUp).Render("sistema inteiro") + sDim.Render(" · rede local direta")
+	if s.DNS != "" && s.DNSTunnel {
+		out += sDim.Render(" · DNS " + s.DNS + " pelo túnel ([n] desliga)")
+	} else if s.DNS != "" {
+		out += lipgloss.NewStyle().Foreground(cYellow).Render(" · DNS pelo túnel desligado ([n] liga)")
+	} else {
+		out += lipgloss.NewStyle().Foreground(cYellow).Render(" · config sem DNS: DNS sai direto")
+	}
+	if s.IPv6Direct {
+		out += sDim.Render(" · IPv6 bloqueado (config sem IPv6)")
+	}
+	return out
+}
+
+func flowStatus(s Stats) string {
+	if s.FullTunnel {
+		return fmt.Sprintf("%d fluxos no túnel (%d do jogo)", s.Flows, s.GameFlows)
+	}
+	return fmt.Sprintf("%d fluxos do jogo no túnel", s.GameFlows)
+}
+
+func udpDupStatus(s Stats) string {
+	if !s.UDPDupOn {
+		return sDim.Render("desligado ([u] liga)")
+	}
+	if s.FullTunnel {
+		return lipgloss.NewStyle().Foreground(cYellow).Render("pausado: sistema inteiro")
+	}
+	return lipgloss.NewStyle().Foreground(cYellow).Render(fmt.Sprintf("%d:1 · direto %d · perdas %d · erros %d · forcar %v", s.UDPCopies, s.UDPDupSent, s.UDPDupDropped, s.UDPDupErrors, s.UDPForce))
+}
+
+func mirrorStatus(s Stats) string {
+	if !s.MirrorOn {
+		return sDim.Render("desligado  ([m] liga, para NotMeter / Shugo.gg)")
+	}
+	green := lipgloss.NewStyle().Foreground(cGreen)
+	yellow := lipgloss.NewStyle().Foreground(cYellow)
+	out := ""
+	if s.MeterOK {
+		out = green.Render("adaptador " + s.MeterAdapter)
+	} else {
+		out = yellow.Render("adaptador: " + s.MeterAdapter)
+	}
+	if len(s.MirrorFlows) == 0 {
+		out += sDim.Render(" · loopback: aguardando o jogo (entre / troque de zona)")
+	} else {
+		out += sDim.Render(" · loopback: " + strings.Join(s.MirrorFlows, "  "))
+	}
+	return out
+}
+
+func row(label, value string) string {
+	return sLabel.Render(fmt.Sprintf("%-12s", label)) + value
+}
+
+// ---------------------------------------------------------------- view
+
+func (m model) View() string {
+	w := m.width
+	if w < 70 {
+		w = 70
+	}
+	inner := w - 4
+
+	// header
+	status := lipgloss.NewStyle().Foreground(cRed).Bold(true).Render("● DESCONECTADO")
+	if m.connecting {
+		status = lipgloss.NewStyle().Foreground(cYellow).Bold(true).Render("◌ CONECTANDO…")
+	} else if m.eng != nil {
+		status = lipgloss.NewStyle().Foreground(cGreen).Bold(true).Render("● CONECTADO")
+	}
+	title := sTitle.Render("AION 2 · WireGuard Split Tunnel")
+	modeBadge := lipgloss.NewStyle().Foreground(lipgloss.Color("#000000")).Background(cDown).Padding(0, 1).Render("SÓ JOGO")
+	if m.settings.FullTunnel {
+		modeBadge = lipgloss.NewStyle().Foreground(lipgloss.Color("#000000")).Background(cUp).Padding(0, 1).Render("SISTEMA INTEIRO")
+	}
+	title += " " + modeBadge
+	gap := w - lipgloss.Width(title) - lipgloss.Width(status) - 1
+	if gap < 1 {
+		gap = 1
+	}
+	header := title + strings.Repeat(" ", gap) + status
+
+	// status panel
+	var stat []string
+	if m.eng != nil {
+		s := m.stats
+		hs := sDim.Render("aguardando…")
+		if !s.Handshake.IsZero() {
+			ago := time.Since(s.Handshake).Round(time.Second)
+			c := cGreen
+			if ago > 3*time.Minute {
+				c = cRed
+			}
+			hs = lipgloss.NewStyle().Foreground(c).Render(fmt.Sprintf("há %s", ago))
+		}
+		procs := processSummary(s.Procs)
+		stat = append(stat,
+			row("Config", sBold.Render(m.engName)+sDim.Render("  · ativo há "+time.Since(m.since).Round(time.Second).String())),
+			row("Endpoint", s.Endpoint+sDim.Render("   túnel ")+s.TunnelAddr),
+			row("Handshake", hs),
+			row("Processo", procs),
+			row("Modo", modeStatus(s)),
+			row("Conexões", flowStatus(s)),
+			row("Espelho DPS", mirrorStatus(s)),
+			row("UDP extra", udpDupStatus(s)),
+			row("Ordem UDP", fmt.Sprintf("saida recente %v (perdas %d) · chegada recente %v (perdas %d)", s.UDPNewestOut, s.UDPSendDropped, s.UDPNewestIn, s.UDPRecvDropped)),
+		)
+	} else {
+		stat = append(stat, sDim.Render("Selecione uma config abaixo e pressione Enter para conectar."))
+		on := sDim.Render("desligado  ([m] liga)")
+		if m.settings.Mirror {
+			on = lipgloss.NewStyle().Foreground(cGreen).Render("ligado")
+		}
+		stat = append(stat, row("Espelho DPS", on))
+		du := sDim.Render("desligado ([u] liga)")
+		if m.settings.UDPDuplicate {
+			du = lipgloss.NewStyle().Foreground(cYellow).Render("ligado (experimental)")
+		}
+		stat = append(stat, row("UDP extra", fmt.Sprintf("%d:1 · forcar %v · %s", normalizeUDPCopies(m.settings.UDPCopies), m.settings.UDPForce, du)))
+		stat = append(stat, row("Ordem UDP", fmt.Sprintf("saida recente %v · chegada recente %v", m.settings.UDPNewestOut, m.settings.UDPNewestIn)))
+		md := "só jogo  ([s] muda para sistema inteiro)"
+		if m.settings.FullTunnel {
+			md = "sistema inteiro  ([s] muda para só jogo)"
+		}
+		stat = append(stat, row("Modo", sDim.Render(md)))
+	}
+
+	// ping panel
+	var ping []string
+	if m.eng != nil {
+		s := m.stats
+		gameLbl := "Jogo (túnel)"
+		ping = append(ping,
+			row("VPN direto", fmtPing(s.PingEndpoint)+sDim.Render("  "+s.PingEndpoint.Target)),
+			row("Túnel", fmtPing(s.PingTunnel)+sDim.Render("  "+s.PingTunnel.Target)),
+			row(gameLbl, fmtPing(s.PingGame)+sDim.Render("  "+s.PingGame.Target)),
+			sLabel.Render(fmt.Sprintf("%-12s", "Histórico"))+sparkline(m.histPing, inner-14, cAccent),
+		)
+	}
+
+	// traffic panel
+	var traffic []string
+	if m.eng != nil {
+		s := m.stats
+		pair := func(up, down float64) string {
+			a := lipgloss.NewStyle().Foreground(cUp).Bold(true).Width(18).Render("▲ " + fmtRate(up))
+			return a + lipgloss.NewStyle().Foreground(cDown).Bold(true).Render("▼ "+fmtRate(down))
+		}
+		{
+			lbl := "Túnel total"
+			if s.FullTunnel {
+				lbl = "Sistema"
+			}
+			traffic = append(traffic,
+				row(lbl, pair(m.upRate, m.downRate)),
+				row("", sDim.Render(fmt.Sprintf("total ▲ %s  ▼ %s", fmtBytes(s.Up), fmtBytes(s.Down)))))
+		}
+		traffic = append(traffic,
+			row("AION 2", pair(m.gUpRate, m.gDnRate)),
+			row("", sDim.Render(fmt.Sprintf("total ▲ %s  ▼ %s", fmtBytes(s.GameUp), fmtBytes(s.GameDown)))),
+			row("WireGuard", sDim.Render(fmt.Sprintf("▲ %s  ▼ %s  (com overhead · total ▲ %s ▼ %s)",
+				fmtRate(m.wgTxRate), fmtRate(m.wgRxRate), fmtBytes(s.WGTx), fmtBytes(s.WGRx)))),
+			sLabel.Render(fmt.Sprintf("%-12s", "Upload"))+sparkline(m.histUp, inner-14, cUp),
+			sLabel.Render(fmt.Sprintf("%-12s", "Download"))+sparkline(m.histDown, inner-14, cDown),
+		)
+	}
+
+	// configs
+	var cfg []string
+	if len(m.configs) == 0 {
+		cfg = append(cfg, sDim.Render("(nenhuma — [i] para importar)"))
+	}
+	for i, c := range m.configs {
+		mark := "  "
+		line := c
+		if i == m.cursor {
+			mark = sSel.Render("▸ ")
+			line = sSel.Render(c)
+		}
+		if m.eng != nil && c == m.engName {
+			line += lipgloss.NewStyle().Foreground(cGreen).Render("  ● em uso")
+		}
+		cfg = append(cfg, mark+line)
+	}
+
+	box := func(title string, lines []string) string {
+		t := lipgloss.NewStyle().Foreground(cAccent).Bold(true).Render(title)
+		return sBox.Width(inner).Render(t + "\n" + strings.Join(lines, "\n"))
+	}
+
+	parts := []string{header, box("Status", stat)}
+	if m.eng != nil {
+		parts = append(parts, box("Ping", ping), box("Tráfego", traffic))
+	}
+	if m.eng != nil && m.showDiag {
+		d, r := m.stats.Diag, m.diagRate
+		line := func(label string, total, rate uint64) string {
+			return row(label, fmt.Sprintf("%-10d %s", total, sDim.Render(fmt.Sprintf("(%d/s)", rate))))
+		}
+		warn := func(label string, total, rate uint64) string {
+			s := line(label, total, rate)
+			if rate > 0 {
+				s += lipgloss.NewStyle().Foreground(cRed).Render("  ◀")
+			}
+			return s
+		}
+		diag := []string{
+			line("→ túnel", d.Captured, r.Captured),
+			line("← túnel", d.Injected, r.Injected),
+			line("DNS perg.", d.DNSQ, r.DNSQ),
+			line("DNS resp.", d.DNSA, r.DNSA),
+			warn("Sem fluxo", d.InNoNAT, r.InNoNAT),
+			warn("Erro inj.", d.InjectErr, r.InjectErr),
+			warn("Fila cheia", d.TunDrop, r.TunDrop),
+			line("LSO divid.", d.Segmented, r.Segmented),
+			line("ICMP erro", d.ICMPErr, r.ICMPErr),
+			line("Tabelas", d.TableDumps, r.TableDumps),
+			line("IPv6 bloq.", d.V6Blocked, r.V6Blocked),
+		}
+		parts = append(parts, box("Diagnóstico  [g] fecha", diag))
+	}
+	if len(m.tests) > 0 || m.testing {
+		var tl []string
+		for _, r := range m.tests {
+			mark := lipgloss.NewStyle().Foreground(cGreen).Render("✔")
+			if !r.OK {
+				mark = lipgloss.NewStyle().Foreground(cRed).Render("✘")
+			}
+			tl = append(tl, mark+" "+sLabel.Render(fmt.Sprintf("%-28s", r.Name))+
+				lipgloss.NewStyle().Width(inner-34).Render(r.Detail+sDim.Render(fmt.Sprintf("  %d ms", r.Dur.Milliseconds()))))
+		}
+		if m.testing {
+			tl = append(tl, lipgloss.NewStyle().Foreground(cYellow).Render("◌ testando…"))
+		}
+		parts = append(parts, box("Autoteste  [x] repete", tl))
+	}
+	parts = append(parts, box("Configs", cfg))
+
+	// logs: fill remaining height
+	logN := 6
+	if m.height > 0 {
+		used := lipgloss.Height(strings.Join(parts, "\n")) + 6
+		if n := m.height - used; n > 3 {
+			logN = n
+		} else {
+			logN = 3
+		}
+	}
+	lg := m.logs
+	if len(lg) > logN {
+		lg = lg[len(lg)-logN:]
+	}
+	var lgr []string
+	for _, l := range lg {
+		st := sDim
+		if strings.Contains(l, "ERRO") {
+			st = lipgloss.NewStyle().Foreground(cRed)
+		}
+		lgr = append(lgr, st.Width(inner-2).Render(l))
+	}
+	if all := strings.Split(strings.Join(lgr, "\n"), "\n"); len(all) > logN {
+		lgr = all[len(all)-logN:]
+	}
+	parts = append(parts, box("Log", lgr))
+
+	// footer / prompt
+	switch m.mode {
+	case modeImport:
+		parts = append(parts, sBold.Render("Caminho do .conf: ")+m.input.View()+sDim.Render("  [Enter] ok  [Esc] cancelar"))
+	case modeProcs:
+		parts = append(parts, sBold.Render("Processos (separados por vírgula): ")+m.input.View())
+	case modePing:
+		parts = append(parts, sBold.Render("IP para ping no túnel: ")+m.input.View())
+	case modeUDPCopies:
+		parts = append(parts, sBold.Render("Copias UDP por original (1..8): ")+m.input.View()+sDim.Render("  [Enter] ok  [Esc] cancelar"))
+	case modeDelete:
+		parts = append(parts, lipgloss.NewStyle().Foreground(cRed).Bold(true).Render(
+			fmt.Sprintf("Remover %s? [s/y] sim  [qualquer tecla] não", m.configs[m.cursor])))
+	default:
+		k := func(key, desc string) string { return sKey.Render("["+key+"]") + " " + sDim.Render(desc) }
+		act := "conectar"
+		if m.eng != nil {
+			act = "desconectar"
+		}
+		parts = append(parts, lipgloss.NewStyle().Width(w).Render(strings.Join([]string{
+			k("Enter", act), k("i", "importar"), k("↑↓", "escolher"), k("p", "processos"),
+			k("s", "sistema inteiro"), k("n", "DNS túnel"), k("m", "espelho DPS"), k("u", "dup UDP"), k("r", "proporcao"), k("f", "forcar UDP"), k("o", "envio recente"), k("a", "chegada recente"), k("x", "autoteste"), k("g", "diagnóstico"), k("e", "exportar p/ WG oficial"), k("t", "alvo do ping"), k("d", "remover"), k("q", "sair"),
+		}, "  ")))
+	}
+	return strings.Join(parts, "\n")
+}
+
+func runTUI() error {
+	program = tea.NewProgram(newModel(), tea.WithAltScreen())
+	finished := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case msg := <-programLogs:
+				program.Send(msg) // only the dispatcher can block here
+			case <-finished:
+				return
+			}
+		}
+	}()
+	_, err := program.Run()
+	close(finished)
+	return err
+}

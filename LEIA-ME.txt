@@ -1,0 +1,122 @@
+AionWG — cliente WireGuard (TUI) para o AION 2
+===============================================
+
+Como funciona
+  Não mexe nas rotas do Windows. O WinDivert intercepta os pacotes de saída;
+  os que pertencem aos programas da lista (AION 2, Steam e os processos que
+  o jogo abre, como a loja) são reescritos para o IP do túnel e enviados pelo
+  WireGuard (wireguard-go embutido). As respostas voltam pelo túnel e são
+  reinjetadas na sua placa de rede. O resto do PC continua na conexão normal
+  — ou, no modo SISTEMA INTEIRO, tudo vai pelo túnel.
+
+Instalação
+  1. Extraia TODOS os arquivos na mesma pasta:
+       AionWG.exe, WinDivert.dll, WinDivert64.sys
+     (opcional, para DPS meter: wintun.dll — veja abaixo)
+  2. Abra AionWG.exe (ele pede Administrador — o driver WinDivert exige).
+     Use o Windows Terminal para as cores/gráficos ficarem bonitos.
+
+Teclas
+  [i]      importar um .conf do WireGuard (cole o caminho ou arraste o arquivo)
+  [↑/↓]    escolher config
+  [Enter]  conectar / desconectar
+  [p]      editar a lista de executáveis tunelados
+  [s]      alterna SÓ JOGO / SISTEMA INTEIRO
+  [n]      liga/desliga o DNS pelo túnel (modo sistema inteiro)
+  [m]      liga/desliga o espelho para DPS meter
+  [x]      autoteste: DNS, IP de saída, Steam, download e upload pelo túnel
+  [g]      painel de diagnóstico (contadores)
+  [e]      exporta configs para o WireGuard oficial
+  [t]      alvo do ping no túnel (vazio = automático)
+  [d]      remover config
+  [q]      sair (desliga o túnel)
+
+  As configs ficam em %APPDATA%\AionWG\configs.
+
+IMPORTANTE
+  * Conecte o túnel ANTES de logar no jogo. Conexões já abertas mudariam de
+    IP no meio do caminho e o servidor do jogo derrubaria a sessão.
+  * Confira o nome do executável: Gerenciador de Tarefas → Detalhes, com o
+    jogo aberto. Padrão: Aion2.exe, Aion2-Win64-Shipping.exe, steam.exe e
+    steamwebhelper.exe. Se for outro, use [p]. A tela mostra "AION 2 não está
+    aberto" enquanto não achar.
+  * Processos abertos pelo jogo (loja / navegador embutido, ex.
+    UnrealCEFSubProcess.exe) entram no túnel automaticamente.
+  * Se a config não tem IPv6, o IPv6 dos programas tunelados é bloqueado
+    (eles passam na hora para IPv4, que vai pelo túnel). Assim a loja e o
+    jogo não aparecem com IPs diferentes para o servidor.
+  * O servidor WireGuard precisa fazer NAT/encaminhamento para a internet
+    (wg-easy, PiVPN, scripts "wireguard-install" já fazem). O AllowedIPs da
+    config deve cobrir os IPs do jogo (0.0.0.0/0 é o mais simples).
+
+Modo sistema inteiro ([s])
+  Todo o tráfego do PC passa pelo túnel, como um VPN normal. Continua direto:
+  rede local (roteador, impressora, 192.168.x.x, 10.x…), multicast e o
+  próprio WireGuard. IPs privados do lado do VPN (a sub-rede do túnel ou
+  rotas específicas do AllowedIPs) vão pelo túnel.
+  DNS: se a config tiver "DNS = ...", as consultas DNS do Windows vão para
+  esse servidor pelo túnel (sem vazamento). Sem DNS na config, ou com [n]
+  desligado, o DNS sai direto pelo seu provedor.
+  Pode trocar de modo com o túnel ligado; conexões abertas caem uma vez e
+  reconectam. ICMP (ping do Windows) não passa pelo túnel.
+
+DPS meter (NotMeter, Shugo.gg, A2Tools…)
+  Os meters leem os pacotes do jogo com o Npcap. Com o túnel, esses pacotes
+  saem criptografados e o meter não vê nada. Com o espelho ligado ([m]) o
+  AionWG entrega uma cópia decifrada do tráfego do jogo em DOIS lugares:
+
+  A) Adaptador "AionWG-Meter" (recomendado)
+     Um adaptador de rede próprio onde aparecem os pacotes do jogo exatamente
+     como seriam na sua placa de rede (mesmos IPs e portas). O Windows
+     descarta essas cópias; só o Npcap/meter as vê.
+     Precisa do wintun.dll (driver oficial do WireGuard, assinado):
+       1. Baixe wintun-0.14.1.zip em https://www.wintun.net
+       2. Copie wintun\bin\amd64\wintun.dll para a pasta do AionWG.exe
+  B) Loopback (127.0.0.1), igual ao ExitLag — funciona sem nada extra se o
+     Npcap foi instalado com "Support loopback traffic".
+
+  Passo a passo:
+  1. Npcap instalado ("WinPcap API-compatible Mode" e "Support loopback
+     traffic" marcados).
+  2. No AionWG: [m] e conecte. O status mostra "adaptador AionWG-Meter
+     (N pacotes)" e/ou a conexão de loopback.
+  3. Abra o meter DEPOIS de conectar (para ele enxergar o adaptador novo).
+     Se ele deixar escolher adaptador: "AionWG-Meter"; se não funcionar,
+     tente o de loopback.
+  4. Entre no jogo ou troque de zona/teleporte para o meter detectar.
+  NÃO coloque o meter na lista de processos ([p]) — isso não ajuda.
+
+WireGuard oficial ([e])
+  O cliente oficial não separa por programa, só por IP. O [e] gera, na pasta
+  configs-wireguard-oficial ao lado do .exe:
+    <nome>-sistema.conf  tudo pelo túnel, menos rede local e o próprio VPS
+    <nome>-jogo.conf     faixas de IP da NCSOFT, do servidor do AION 2 e da
+                         Valve/Steam + os IPs que o AionWG viu o jogo, a loja
+                         e a Steam usarem
+  Para o -jogo.conf ficar completo: conecte no AionWG, jogue alguns minutos
+  (login, troca de canal/zona, abrir a loja) e só então aperte [e].
+  No cliente oficial: "Importar túnel(s) de arquivo". Não use junto com o
+  AionWG.
+
+Algo não conecta? (ex.: Steam, loja)
+  Conecte, aperte [x] e mande um print do quadro "Autoteste" (e do [g]).
+  Ele mostra se o problema é DNS, o VPS, bloqueio do IP do VPS ou pacotes
+  grandes (MTU).
+
+Painel
+  Ping
+    VPN direto    ICMP do seu PC até o servidor VPN (fora do túnel)
+    Túnel         ICMP pelo túnel até o gateway (ex.: 10.66.66.1)
+    Jogo (túnel)  ICMP pelo túnel até o servidor do AION 2 detectado
+                  ("sem resposta" = o servidor do jogo bloqueia ICMP)
+    Histórico     gráfico do ping do jogo (ou do túnel)
+  Tráfego
+    Túnel total / Sistema   tudo que passa pelo túnel
+    AION 2                  só o jogo
+    WireGuard               medido no cabo, com o overhead da criptografia
+
+Avisos
+  * Anti-cheat: alguns anti-cheats não gostam de drivers de captura de pacote
+    (WinDivert). Use por sua conta e risco.
+  * Antivírus às vezes marca WinDivert64.sys como "riskware" — é o driver
+    oficial assinado do projeto WinDivert 2.2.2 (github.com/basil00/WinDivert).

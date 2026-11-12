@@ -1,0 +1,17 @@
+# Configs WireGuard contêm chaves privadas: nunca versionar.
+*.conf
+configs-wireguard-oficial/
+
+# Binários, drivers e artefatos de build.
+*.exe
+*.dll
+*.sys
+*.zip
+dist/
+
+# Ruído do Windows.
+desktop.ini
+Thumbs.db
+
+# Licença do WinDivert acompanha os binários, não o código.
+WinDivert-LICENSE.txt

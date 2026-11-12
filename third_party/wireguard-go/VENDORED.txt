@@ -1,0 +1,1 @@
+Vendored from github.com/WireGuard/wireguard-go b3bc704ef0ee (MIT). Removed tun/tun_windows.go (wintun) and tun/netstack (gvisor) – not used: AionWG supplies its own tun.Device.

@@ -1,0 +1,89 @@
+package main
+
+import (
+	"bytes"
+	"encoding/binary"
+	"net/netip"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestReasmOrder(t *testing.T) {
+	var r reasm
+	var got []byte
+	emit := func(b []byte) { got = append(got, b...) }
+	r.syn(0xFFFFFFF0) // wraps around 2^32
+	base := uint32(0xFFFFFFF1)
+	r.push(base+6, []byte("WORLD"), emit) // out of order
+	r.push(base, []byte("HELLO "), emit)
+	r.push(base, []byte("HELLO "), emit)   // retransmission
+	r.push(base+3, []byte("LO WOR"), emit) // overlap
+	r.push(base+11, []byte("!!"), emit)
+	if string(got) != "HELLO WORLD!!" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// mkTCP builds an IPv4 TCP packet.
+func mkTCP(src, dst string, sport, dport uint16, seq uint32, flags byte, payload []byte) []byte {
+	b := make([]byte, 40+len(payload))
+	b[0] = 0x45
+	binary.BigEndian.PutUint16(b[2:], uint16(len(b)))
+	b[8], b[9] = 64, protoTCP
+	s, d := netip.MustParseAddr(src).As4(), netip.MustParseAddr(dst).As4()
+	copy(b[12:], s[:])
+	copy(b[16:], d[:])
+	binary.BigEndian.PutUint16(b[20:], sport)
+	binary.BigEndian.PutUint16(b[22:], dport)
+	binary.BigEndian.PutUint32(b[24:], seq)
+	b[32] = 5 << 4
+	b[33] = flags
+	copy(b[40:], payload)
+	return b
+}
+
+func TestMirrorLoopback(t *testing.T) {
+	var mu sync.Mutex
+	got := map[int]*bytes.Buffer{dirC2S: {}, dirS2C: {}}
+	mirrorPeerRead = func(dir int, b []byte) {
+		mu.Lock()
+		got[dir].Write(b)
+		mu.Unlock()
+	}
+	defer func() { mirrorPeerRead = nil }()
+
+	m := newMirror(true, t.Logf)
+	defer m.Close()
+	feed := func(out bool, pkt []byte) {
+		p, ok := parsePacket(pkt)
+		if !ok {
+			t.Fatal("parse")
+		}
+		m.packet(out, pkt, &p)
+	}
+	game, srv := "192.168.0.10", "203.0.113.5"
+	feed(true, mkTCP(game, srv, 50555, 47123, 1000, 0x02, nil))  // SYN
+	feed(false, mkTCP(srv, game, 47123, 50555, 9000, 0x12, nil)) // SYN-ACK
+	feed(true, mkTCP(game, srv, 50555, 47123, 1001, 0x18, []byte("login")))
+	feed(false, mkTCP(srv, game, 47123, 50555, 9006, 0x18, []byte("-damage:999"))) // out of order
+	feed(false, mkTCP(srv, game, 47123, 50555, 9001, 0x18, []byte("hello")))
+	feed(false, mkTCP(srv, game, 47123, 50555, 9001, 0x18, []byte("hello"))) // retransmit
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		a, b := got[dirC2S].String(), got[dirS2C].String()
+		mu.Unlock()
+		if a == "login" && b == "hello-damage:999" {
+			fl := m.Flows()
+			t.Logf("mirror flows: %v", fl)
+			if len(fl) != 1 {
+				t.Fatal("expected one flow")
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("c2s=%q s2c=%q", got[dirC2S].String(), got[dirS2C].String())
+}

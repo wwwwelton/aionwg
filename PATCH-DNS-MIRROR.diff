@@ -1,0 +1,318 @@
+--- a/tunnel_windows.go
++++ b/tunnel_windows.go
+@@ -109,21 +109,23 @@
+ }
+ 
+ type Engine struct {
+-	conf      *WGConf
+-	endpoints []netip.AddrPort
+-	dev       *device.Device
+-	tun       *splitTun
+-	h         divertHandle
+-	owner     *ownerTracker
+-	mirror    *mirror
+-	meterMu   sync.Mutex
+-	meter     *meterAdapter // Wintun copy for Npcap-based DPS meters
+-	meterErr  string
+-	addr4     netip.Addr
+-	addr6     netip.Addr
+-	maxMSS4   uint16
+-	maxMSS6   uint16
+-	logf      func(string, ...any)
++	conf         *WGConf
++	endpoints    []netip.AddrPort
++	dev          *device.Device
++	tun          *splitTun
++	h            divertHandle
++	owner        *ownerTracker
++	mirror       *mirror
++	meterMu      sync.Mutex
++	meter        *meterAdapter // Wintun copy for Npcap-based DPS meters
++	meterErr     string
++	meterOpening bool                          // protected by meterMu; never initialize Wintun on the TUI goroutine
++	meterOpener  func() (*meterAdapter, error) // injectable for regression tests
++	addr4        netip.Addr
++	addr6        netip.Addr
++	maxMSS4      uint16
++	maxMSS6      uint16
++	logf         func(string, ...any)
+ 
+ 	natMu sync.Mutex
+ 	nat   map[portKey]*natEntry
+@@ -247,9 +249,7 @@
+ 
+ 	e.owner = newOwnerTracker(opt.Processes)
+ 	e.mirror = newMirror(opt.Mirror, logf)
+-	if opt.Mirror {
+-		e.openMeter()
+-	}
++	e.meterOpener = openMeterAdapter
+ 	e.full.Store(opt.FullTunnel)
+ 	e.noDNS.Store(opt.NoDNS)
+ 	e.tun = newSplitTun(conf.MTU)
+@@ -283,6 +283,9 @@
+ 	}
+ 	go e.housekeeping()
+ 	go e.pingLoop()
++	if opt.Mirror {
++		e.requestMeter()
++	}
+ 	logf("túnel ativo · endpoint %s · filtro WinDivert aberto", e.endpoints[0])
+ 	return e, nil
+ }
+@@ -728,26 +731,64 @@
+ 
+ func (e *Engine) SetProcesses(names []string) { e.owner.SetNames(names) }
+ 
++// SetMirror must never block Bubble Tea's Update loop. Opening a Wintun
++// adapter can take seconds (or wait on a driver), and the resulting log callback
++// must not synchronously send to the same TUI event loop.
+ func (e *Engine) SetMirror(on bool) {
++	if e.closing.Load() {
++		return
++	}
+ 	e.mirror.SetEnabled(on)
+ 	if on {
+-		e.openMeter()
+-	}
+-}
+-
+-func (e *Engine) openMeter() {
++		e.requestMeter()
++	}
++}
++
++// requestMeter schedules at most one Wintun initialization. It never calls
++// Windows driver APIs or user callbacks while holding meterMu.
++func (e *Engine) requestMeter() {
+ 	e.meterMu.Lock()
+-	defer e.meterMu.Unlock()
+-	if e.meter != nil {
+-		return
+-	}
+-	m, err := openMeterAdapter()
++	if e.closing.Load() || !e.mirror.enabled.Load() || e.meter != nil || e.meterOpening {
++		e.meterMu.Unlock()
++		return
++	}
++	e.meterOpening = true
++	e.meterErr = "inicializando AionWG-Meter…"
++	e.meterMu.Unlock()
++	go e.openMeterAsync()
++}
++
++func (e *Engine) openMeterAsync() {
++	opener := e.meterOpener
++	if opener == nil {
++		opener = openMeterAdapter
++	}
++	m, err := opener()
++
++	e.meterMu.Lock()
++	e.meterOpening = false
++	if e.closing.Load() || !e.mirror.enabled.Load() {
++		e.meterErr = ""
++		e.meterMu.Unlock()
++		if m != nil {
++			m.Close()
++		}
++		return
++	}
+ 	if err != nil {
+ 		e.meterErr = err.Error()
++		e.meterMu.Unlock()
+ 		e.logf("adaptador do meter: %v", err)
+ 		return
+ 	}
++	if m == nil {
++		e.meterErr = "Wintun retornou adaptador nulo"
++		e.meterMu.Unlock()
++		e.logf("adaptador do meter: Wintun retornou adaptador nulo")
++		return
++	}
+ 	e.meter, e.meterErr = m, ""
++	e.meterMu.Unlock()
+ 	e.logf("adaptador %s pronto — no meter, escolha esse adaptador (ou reabra o meter)", meterAdapterName)
+ }
+ 
+@@ -808,9 +849,12 @@
+ 		e.mirror.Close()
+ 	}
+ 	e.meterMu.Lock()
+-	e.meter.Close()
++	meter := e.meter
+ 	e.meter = nil
+ 	e.meterMu.Unlock()
++	if meter != nil {
++		meter.Close()
++	}
+ }
+ 
+ // ---------------------------------------------------------------- direct ICMP (IcmpSendEcho)
+--- a/tui_windows.go
++++ b/tui_windows.go
+@@ -15,6 +15,22 @@
+ )
+ 
+ var program *tea.Program
++
++// Bubble Tea's Program.Send may block until Update consumes the message.
++// Never call it synchronously from an Engine callback invoked by Update
++// (notably the Mirror toggle), or the UI can deadlock itself.
++var programLogs = make(chan logMsg, 256)
++
++func queueProgramLog(msg logMsg) {
++	enqueueProgramLog(programLogs, msg)
++}
++
++func enqueueProgramLog(queue chan<- logMsg, msg logMsg) {
++	select {
++	case queue <- msg:
++	default: // bounded: drop diagnostic logs rather than freeze packet/UI threads
++	}
++}
+ 
+ // ---------------------------------------------------------------- styles
+ 
+@@ -136,9 +152,7 @@
+ 		eng, err := StartEngine(conf, EngineOptions{
+ 			Processes: s.Processes, PingTarget: s.PingTarget, Mirror: s.Mirror, FullTunnel: s.FullTunnel, NoDNS: s.NoDNS,
+ 		}, func(f string, a ...any) {
+-			if program != nil {
+-				program.Send(logMsg(fmt.Sprintf(f, a...)))
+-			}
++			queueProgramLog(logMsg(fmt.Sprintf(f, a...)))
+ 		})
+ 		return connectedMsg{eng: eng, name: name, err: err}
+ 	}
+@@ -850,6 +864,18 @@
+ 
+ func runTUI() error {
+ 	program = tea.NewProgram(newModel(), tea.WithAltScreen())
++	finished := make(chan struct{})
++	go func() {
++		for {
++			select {
++			case msg := <-programLogs:
++				program.Send(msg) // only the dispatcher can block here
++			case <-finished:
++				return
++			}
++		}
++	}()
+ 	_, err := program.Run()
++	close(finished)
+ 	return err
+ }
+--- /dev/null
++++ b/mirror_toggle_windows_test.go
+@@ -0,0 +1,109 @@
++//go:build windows
++
++package main
++
++import (
++	"errors"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++// Regression: N (DNS) followed by M (Mirror) with an active engine must not
++// block Bubble Tea's Update while Windows initializes the Wintun driver.
++func TestDNSThenMirrorDoesNotBlock(t *testing.T) {
++	started := make(chan struct{})
++	release := make(chan struct{})
++	var calls atomic.Int32
++	e := &Engine{
++		mirror: newMirror(false, func(string, ...any) {}),
++		logf:   func(string, ...any) {},
++		meterOpener: func() (*meterAdapter, error) {
++			calls.Add(1)
++			close(started)
++			<-release
++			return nil, errors.New("Wintun indisponível")
++		},
++	}
++	defer e.mirror.Close()
++
++	e.SetNoDNS(true)
++	returned := make(chan struct{})
++	go func() { e.SetMirror(true); close(returned) }()
++	select {
++	case <-returned:
++	case <-time.After(time.Second):
++		close(release)
++		t.Fatal("SetMirror bloqueou a interface enquanto inicializava Wintun")
++	}
++	select {
++	case <-started:
++	case <-time.After(time.Second):
++		close(release)
++		t.Fatal("inicialização assíncrona não começou")
++	}
++	e.SetMirror(true) // repeated keypress must not start another driver init
++	if got := calls.Load(); got != 1 {
++		close(release)
++		t.Fatalf("inicializações simultâneas: %d, esperado 1", got)
++	}
++	e.SetMirror(false)
++	close(release)
++	deadline := time.Now().Add(time.Second)
++	for time.Now().Before(deadline) {
++		e.meterMu.Lock()
++		pending := e.meterOpening
++		e.meterMu.Unlock()
++		if !pending {
++			return
++		}
++		time.Sleep(time.Millisecond)
++	}
++	t.Fatal("inicialização não concluiu após liberar o driver")
++}
++
++func TestMirrorDoesNotBlockOnLogCallback(t *testing.T) {
++	logEntered := make(chan struct{})
++	logRelease := make(chan struct{})
++	e := &Engine{
++		mirror: newMirror(false, func(string, ...any) {}),
++		logf:   func(string, ...any) { close(logEntered); <-logRelease },
++		meterOpener: func() (*meterAdapter, error) {
++			return nil, errors.New("falha simulada")
++		},
++	}
++	defer e.mirror.Close()
++	returned := make(chan struct{})
++	go func() { e.SetMirror(true); close(returned) }()
++	select {
++	case <-returned:
++	case <-time.After(time.Second):
++		close(logRelease)
++		t.Fatal("SetMirror bloqueou esperando o callback de log")
++	}
++	select {
++	case <-logEntered:
++	case <-time.After(time.Second):
++		close(logRelease)
++		t.Fatal("callback não recebeu o erro")
++	}
++	close(logRelease)
++}
++
++func TestLogQueueDoesNotBlockWhenFull(t *testing.T) {
++	queue := make(chan logMsg, 1)
++	enqueueProgramLog(queue, logMsg("primeiro"))
++	returned := make(chan struct{})
++	go func() {
++		enqueueProgramLog(queue, logMsg("descartado"))
++		close(returned)
++	}()
++	select {
++	case <-returned:
++	case <-time.After(time.Second):
++		t.Fatal("fila de logs bloqueou com o consumidor ocupado")
++	}
++	if got := <-queue; got != logMsg("primeiro") {
++		t.Fatalf("mensagem original perdida: %q", got)
++	}
++}
