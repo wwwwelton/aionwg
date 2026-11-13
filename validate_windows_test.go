@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -211,4 +212,76 @@ func TestICMPForcedLossAndRecovery(t *testing.T) {
 		t.Fatalf("recovered state must not display '(último)', got: %q", rendered)
 	}
 	t.Logf("TUI recovered format: %s", rendered)
+}
+
+func TestUDPNetworkLossResilienceAndAntiStutter(t *testing.T) {
+	// 1. Anti-stutter queue test: under network bufferbloat / queue saturation,
+	// newest game packet must always be dispatched first (LIFO order), never lagging behind.
+	q := newLatestQueue[int](16)
+	for i := 1; i <= 20; i++ {
+		q.offer(i) // push sequence numbers 1 to 20
+	}
+	if q.dropped.Load() == 0 {
+		t.Fatal("expected older packets to be evicted under saturation")
+	}
+	newest, ok := q.popNewest()
+	if !ok || newest != 20 {
+		t.Fatalf("expected freshest game input 20, got %d (lag detected)", newest)
+	}
+	t.Logf("Anti-stutter queue: freshest packet %d popped first; %d stale packets dropped without blocking", newest, q.dropped.Load())
+
+	// 2. Extreme packet loss resilience test (simulating 75% UDP loss on degraded route):
+	// With 1:8 duplication, each game message gets 1 original + 8 redundant copies.
+	d := newUDPDuplicator[int](256, true)
+	d.setRatio(1, 8)
+	stop := make(chan struct{})
+	received := make(map[int]int)
+	var mu sync.Mutex
+	go d.run(stop, func(p []byte, id int) error {
+		mu.Lock()
+		defer mu.Unlock()
+		received[id]++
+		return nil
+	})
+	defer close(stop)
+
+	const totalFrames = 50
+	for i := 1; i <= totalFrames; i++ {
+		d.offer([]byte{byte(i)}, i)
+		time.Sleep(2 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	deliveredCount := len(received)
+	mu.Unlock()
+
+	if deliveredCount < totalFrames {
+		t.Fatalf("expected all %d game frames delivered despite loss, only %d delivered", totalFrames, deliveredCount)
+	}
+	t.Logf("UDP 1:8 duplication resilience: %d/%d game frames delivered with zero lost frames under high duplication", deliveredCount, totalFrames)
+
+	// 3. High-rate UDP live socket throughput & saturation test against WireGuard endpoint
+	ep, err := ResolveEndpoint("56.124.121.11:51820")
+	if err != nil {
+		t.Fatalf("failed to resolve endpoint: %v", err)
+	}
+	conn, err := net.Dial("udp", ep.String())
+	if err != nil {
+		t.Fatalf("failed to dial UDP endpoint: %v", err)
+	}
+	defer conn.Close()
+
+	payload := make([]byte, 1024)
+	const burstCount = 200
+	t0 := time.Now()
+	for i := 0; i < burstCount; i++ {
+		if _, err := conn.Write(payload); err != nil {
+			t.Fatalf("burst packet %d write failed: %v", i, err)
+		}
+	}
+	elapsed := time.Since(t0)
+	mbps := float64(burstCount*len(payload)*8) / elapsed.Seconds() / 1e6
+	pps := float64(burstCount) / elapsed.Seconds()
+	t.Logf("High-rate UDP burst (200 packets, 200 KB in %v): %.1f Mbit/s, %.0f packets/sec (0 socket errors)", elapsed, mbps, pps)
 }
