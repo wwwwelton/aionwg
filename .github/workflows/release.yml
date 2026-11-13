@@ -17,6 +17,19 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Restore TLS certificate
+        shell: bash
+        env:
+          AIONWG_TLS_CERT_PEM: ${{ secrets.AIONWG_TLS_CERT_PEM }}
+          AIONWG_TLS_KEY_PEM: ${{ secrets.AIONWG_TLS_KEY_PEM }}
+        run: |
+          set -euo pipefail
+          if [ -z "$AIONWG_TLS_CERT_PEM" ] || [ -z "$AIONWG_TLS_KEY_PEM" ]; then
+            echo "::error::AIONWG_TLS_CERT_PEM and AIONWG_TLS_KEY_PEM secrets are required; without them the trusted root changes and users must reinstall it."
+            exit 1
+          fi
+          printf '%s\n' "$AIONWG_TLS_CERT_PEM" > internal/tlscert/cert.pem
+          printf '%s\n' "$AIONWG_TLS_KEY_PEM" > internal/tlscert/key.pem
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -35,12 +48,27 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Restore TLS certificate
+        env:
+          AIONWG_TLS_CERT_PEM: ${{ secrets.AIONWG_TLS_CERT_PEM }}
+          AIONWG_TLS_KEY_PEM: ${{ secrets.AIONWG_TLS_KEY_PEM }}
+        run: |
+          set -euo pipefail
+          if [ -z "$AIONWG_TLS_CERT_PEM" ] || [ -z "$AIONWG_TLS_KEY_PEM" ]; then
+            echo "::error::AIONWG_TLS_CERT_PEM and AIONWG_TLS_KEY_PEM secrets are required; without them the trusted root changes and users must reinstall it."
+            exit 1
+          fi
+          printf '%s\n' "$AIONWG_TLS_CERT_PEM" > internal/tlscert/cert.pem
+          printf '%s\n' "$AIONWG_TLS_KEY_PEM" > internal/tlscert/key.pem
+          sha256sum internal/tlscert/cert.pem > "$RUNNER_TEMP/cert.sha256"
       - name: Install toolchain
         run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 zip
       - name: Native regression check
         run: cc -std=c11 -Wall -Wextra -Werror native/shugo-compat-test.c -o /tmp/shugo-check && /tmp/shugo-check
       - name: Build embedded EXE
         run: ./build-embedded.sh
+      - name: Verify certificate unchanged
+        run: sha256sum -c "$RUNNER_TEMP/cert.sha256"
       - name: Compute next version
         id: version
         run: |

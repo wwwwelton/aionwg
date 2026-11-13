@@ -1,5 +1,5 @@
 // Package tlscert embeds the AionWG self-signed certificate and its private key.
-// The files are regenerated on every embedded build by `go run ./internal/tlscert/gen`.
+// Created once by `go run ./internal/tlscert/gen` and reused; release CI restores it from secrets so the trusted root never changes.
 package tlscert
 
 import _ "embed"
