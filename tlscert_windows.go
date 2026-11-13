@@ -35,8 +35,8 @@ func ensureCertTrusted() error {
 	sum := sha1.Sum(block.Bytes)
 	thumb := hex.EncodeToString(sum[:])
 	// Match by thumbprint: every build has a new key, so CN alone is not enough.
-	if out, err := exec.Command("certutil", "-store", "Root").Output(); err == nil &&
-		strings.Contains(strings.ReplaceAll(strings.ToLower(string(out)), " ", ""), thumb) {
+	// Accept either store: the wizard may install into the current user's Root.
+	if rootStoreHas("", thumb) || rootStoreHas("-user", thumb) {
 		return nil
 	}
 	msg, _ := windows.UTF16PtrFromString("O certificado '" + certCN + "' do AionWG não está instalado como raiz confiável. Instalar agora?")
@@ -57,4 +57,15 @@ func ensureCertTrusted() error {
 	}
 	// cryptext.dll shows the standard certificate dialog with "Instalar Certificado".
 	return exec.Command("rundll32.exe", "cryptext.dll,CryptExtOpenCER", p).Start()
+}
+
+// rootStoreHas reports whether the certutil Root store (machine when scope is empty,
+// current user when "-user") contains the certificate with the given SHA-1 thumbprint.
+func rootStoreHas(scope, thumb string) bool {
+	args := []string{"-store", "Root"}
+	if scope != "" {
+		args = append([]string{scope}, args...)
+	}
+	out, err := exec.Command("certutil", args...).Output()
+	return err == nil && strings.Contains(strings.ReplaceAll(strings.ToLower(string(out)), " ", ""), thumb)
 }
