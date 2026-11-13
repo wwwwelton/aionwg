@@ -34,6 +34,10 @@ func main() {
 		}
 		return
 	}
+	if err := tuneRuntime(); err != nil {
+		fmt.Fprintln(os.Stderr, "erro configurando runtime:", err)
+		os.Exit(1)
+	}
 	if err := prepareRuntime(); err != nil {
 		fmt.Println("erro preparando dependências:", err)
 		os.Exit(1)
