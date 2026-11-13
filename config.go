@@ -79,7 +79,7 @@ func ParseConfig(text string) (*WGConf, error) {
 		if strings.HasPrefix(line, "[") {
 			section = strings.ToLower(strings.Trim(line, "[] "))
 			if section == "peer" {
-				c.Peers = append(c.Peers, PeerConf{})
+				c.Peers = append(c.Peers, PeerConf{Keepalive: 15})
 				peer = &c.Peers[len(c.Peers)-1]
 			}
 			continue
@@ -136,6 +136,7 @@ func ParseConfig(text string) (*WGConf, error) {
 					peer.AllowedIPs = append(peer.AllowedIPs, p.Masked())
 				}
 			case "persistentkeepalive":
+				peer.Keepalive = 0
 				if v != "off" {
 					peer.Keepalive, err = strconv.Atoi(v)
 				}

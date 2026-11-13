@@ -254,6 +254,32 @@ func TestParseConfig(t *testing.T) {
 	}
 }
 
+func TestPeerKeepaliveDefaultAndOverrides(t *testing.T) {
+	for _, tc := range []struct {
+		name, setting, want string
+	}{
+		{"omitted", "", "persistent_keepalive_interval=15\n"},
+		{"explicit", "PersistentKeepalive = 25", "persistent_keepalive_interval=25\n"},
+		{"zero", "PersistentKeepalive = 0", ""},
+		{"off", "PersistentKeepalive = off", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := ParseConfig(strings.Replace(sampleConf, "PersistentKeepalive = 25", tc.setting, 1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			uapi := c.UAPI([]netip.AddrPort{netip.MustParseAddrPort("203.0.113.10:51820")})
+			if tc.want == "" {
+				if c.Peers[0].Keepalive != 0 || strings.Contains(uapi, "persistent_keepalive_interval=") {
+					t.Fatalf("keepalive explicitly disabled: %s", uapi)
+				}
+			} else if !strings.Contains(uapi, tc.want) {
+				t.Fatalf("want %q in UAPI: %s", tc.want, uapi)
+			}
+		})
+	}
+}
+
 func TestParseConfigRejectsBadEndpointPort(t *testing.T) {
 	for _, port := range []string{"0", "65536", "65537", "-1", "abc"} {
 		conf := strings.Replace(sampleConf, "203.0.113.10:51820", "203.0.113.10:"+port, 1)
