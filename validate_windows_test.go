@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -145,4 +146,69 @@ func TestWg03JogoGemini(t *testing.T) {
 
 	measureICMP("WireGuard peer endpoint", ep.Addr())
 	measureICMP("AION 2 game server", netip.MustParseAddr("193.202.112.161"))
+}
+
+func TestICMPForcedLossAndRecovery(t *testing.T) {
+	pinger, err := newIcmpPinger()
+	if err != nil {
+		t.Fatalf("failed to create ICMP pinger: %v", err)
+	}
+	defer pinger.close()
+
+	// 1. Simulate edge firewall dropping ICMP (blackhole IP from RFC 5737 TEST-NET-1)
+	blackhole := netip.MustParseAddr("192.0.2.1")
+	rtt, code := pinger.ping(blackhole, 300*time.Millisecond)
+	if code == 0 {
+		t.Fatalf("expected packet loss/timeout for blackholed IP, got RTT=%v", rtt)
+	}
+	t.Logf("Simulated edge firewall drop to %s: code=%d (timeout/unreachable as expected)", blackhole, code)
+
+	// 2. Immediate recovery test: ping reachable endpoint right after a timeout
+	peerIP := netip.MustParseAddr("56.124.121.11")
+	rtt2, code2 := pinger.ping(peerIP, 2*time.Second)
+	if code2 != 0 {
+		t.Fatalf("pinger failed to recover after timeout, got code %d for %s", code2, peerIP)
+	}
+	t.Logf("Instant recovery on reachable peer %s: RTT=%v (code=0, no lingering 11010)", peerIP, rtt2)
+
+	// 3. Test TUI state machine and formatting under forced loss
+	st := &pingState{target: peerIP}
+
+	// A) Initial total loss (never answered)
+	st.err = 11010
+	res := st.result()
+	rendered := fmtPing(res)
+	if !strings.Contains(rendered, "sem resposta (erro 11010)") {
+		t.Fatalf("expected 'sem resposta (erro 11010)', got: %q", rendered)
+	}
+	t.Logf("TUI initial failure format: %s", rendered)
+
+	// B) 10 successful packets followed by 10 dropped packets (50% loss)
+	for range 10 {
+		st.record(true, 18*time.Millisecond)
+	}
+	for range 10 {
+		st.record(false, 0)
+	}
+	res = st.result()
+	if res.Loss != 0.5 {
+		t.Fatalf("expected 50%% loss, got %v", res.Loss)
+	}
+	rendered = fmtPing(res)
+	if !strings.Contains(rendered, "último") || !strings.Contains(rendered, "perda 50%") {
+		t.Fatalf("expected 'último' and 'perda 50%%', got: %q", rendered)
+	}
+	t.Logf("TUI partial loss format: %s", rendered)
+
+	// C) Unblock/recovery: single packet restores active state
+	st.record(true, 17*time.Millisecond)
+	res = st.result()
+	if !res.OK {
+		t.Fatal("expected OK=true on recovery packet")
+	}
+	rendered = fmtPing(res)
+	if strings.Contains(rendered, "último") {
+		t.Fatalf("recovered state must not display '(último)', got: %q", rendered)
+	}
+	t.Logf("TUI recovered format: %s", rendered)
 }
