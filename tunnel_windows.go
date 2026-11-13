@@ -748,6 +748,7 @@ func (e *Engine) pingLoop() {
 	if icmp != nil {
 		defer icmp.close()
 	}
+	var inFlight atomic.Bool
 	tk := time.NewTicker(time.Second)
 	defer tk.Stop()
 	for {
@@ -758,13 +759,16 @@ func (e *Engine) pingLoop() {
 		}
 		// 1) direct to the VPN server (outside the tunnel)
 		if icmp != nil && e.endpoints[0].Addr().Is4() {
-			go func(t netip.Addr) {
-				rtt, code := icmp.ping(t, 900*time.Millisecond)
-				e.pingMu.Lock()
-				e.pings[0].err = code
-				e.pings[0].record(code == 0, rtt)
-				e.pingMu.Unlock()
-			}(e.endpoints[0].Addr())
+			if inFlight.CompareAndSwap(false, true) {
+				go func(t netip.Addr) {
+					defer inFlight.Store(false)
+					rtt, code := icmp.ping(t, 1500*time.Millisecond)
+					e.pingMu.Lock()
+					e.pings[0].err = code
+					e.pings[0].record(code == 0, rtt)
+					e.pingMu.Unlock()
+				}(e.endpoints[0].Addr())
+			}
 		}
 		// 2) through the tunnel
 		e.sendTunnelPing(pingIDGateway, e.gwTarget)
@@ -1157,6 +1161,10 @@ func (p *icmpPinger) ping(dst netip.Addr, timeout time.Duration) (time.Duration,
 	r, _, errno := procIcmpSendEcho.Call(p.h, uintptr(ip), uintptr(unsafe.Pointer(&data[0])), uintptr(len(data)),
 		0, uintptr(unsafe.Pointer(&reply[0])), uintptr(len(reply)), uintptr(timeout.Milliseconds()))
 	if r == 0 {
+		procIcmpCloseHandle.Call(p.h)
+		if nh, _, _ := procIcmpCreateFile.Call(); windows.Handle(nh) != windows.InvalidHandle {
+			p.h = nh
+		}
 		if en, ok := errno.(syscall.Errno); ok && en != 0 {
 			return 0, uint32(en)
 		}
@@ -1166,6 +1174,10 @@ func (p *icmpPinger) ping(dst netip.Addr, timeout time.Duration) (time.Duration,
 	status := *(*uint32)(unsafe.Pointer(&reply[4]))
 	rtt := *(*uint32)(unsafe.Pointer(&reply[8]))
 	if status != 0 {
+		procIcmpCloseHandle.Call(p.h)
+		if nh, _, _ := procIcmpCreateFile.Call(); windows.Handle(nh) != windows.InvalidHandle {
+			p.h = nh
+		}
 		return 0, status
 	}
 	d := time.Duration(rtt) * time.Millisecond

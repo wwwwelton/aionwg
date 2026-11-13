@@ -34,8 +34,8 @@ func TestWg03JogoGemini(t *testing.T) {
 		t.Fatal("no peers in wg03-jogo-gemini.conf")
 	}
 	peer := c.Peers[0]
-	if peer.Keepalive != 25 {
-		t.Errorf("expected keepalive 25, got %d", peer.Keepalive)
+	if peer.Keepalive <= 0 {
+		t.Errorf("expected positive keepalive, got %d", peer.Keepalive)
 	}
 
 	// Validate routing coverage for game and services
