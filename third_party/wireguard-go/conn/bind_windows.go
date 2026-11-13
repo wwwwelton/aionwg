@@ -68,6 +68,7 @@ type afWinRingBind struct {
 	rq        winrio.Rq
 	mu        sync.Mutex
 	blackhole bool
+	qos       socketQoS
 }
 
 // WinRingBind uses Windows registered I/O for fast ring buffered networking.
@@ -202,6 +203,7 @@ func (ring *ringBuffer) CloseAndZero() {
 }
 
 func (bind *afWinRingBind) CloseAndZero() {
+	bind.qos.close()
 	bind.rx.CloseAndZero()
 	bind.tx.CloseAndZero()
 	if bind.sock != 0 {
@@ -243,6 +245,9 @@ func (bind *afWinRingBind) Open(family int32, sa windows.Sockaddr) (windows.Sock
 	var err error
 	bind.sock, err = winrio.Socket(family, windows.SOCK_DGRAM, windows.IPPROTO_UDP)
 	if err != nil {
+		return nil, err
+	}
+	if err = tuneWindowsSocket(bind.sock); err != nil {
 		return nil, err
 	}
 	err = bind.rx.Open()
@@ -443,6 +448,9 @@ func (bind *afWinRingBind) Send(buf []byte, nend *WinRingEndpoint, isOpen *atomi
 	}
 	bind.tx.mu.Lock()
 	defer bind.tx.mu.Unlock()
+	if err := bind.qos.mark(bind.sock, nend); err != nil {
+		return err
+	}
 	var results [packetsPerRing]winrio.Result
 	count := winrio.DequeueCompletion(bind.tx.cq, results[:])
 	if count == 0 && bind.tx.isFull {

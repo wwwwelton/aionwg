@@ -39,6 +39,7 @@ type StdNetBind struct {
 	ipv4RxOffload bool
 	ipv6TxOffload bool
 	ipv6RxOffload bool
+	qos4, qos6    socketQoS
 
 	// these two fields are not guarded by mu
 	udpAddrPool sync.Pool
@@ -302,6 +303,8 @@ func (s *StdNetBind) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.qos4.close()
+	s.qos6.close()
 	var err1, err2 error
 	if s.ipv4 != nil {
 		err1 = s.ipv4.Close()
@@ -351,6 +354,16 @@ func (s *StdNetBind) Send(bufs [][]byte, endpoint Endpoint) error {
 		br = s.ipv6PC
 		is6 = true
 		offload = s.ipv6TxOffload
+	}
+	if !blackhole && conn != nil {
+		qos := &s.qos4
+		if is6 {
+			qos = &s.qos6
+		}
+		if err := qos.markUDP(conn, endpoint.(*StdNetEndpoint).AddrPort); err != nil {
+			s.mu.Unlock()
+			return err
+		}
 	}
 	s.mu.Unlock()
 

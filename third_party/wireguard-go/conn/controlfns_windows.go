@@ -14,10 +14,13 @@ import (
 func init() {
 	controlFns = append(controlFns,
 		func(network, address string, c syscall.RawConn) error {
-			return c.Control(func(fd uintptr) {
-				_ = windows.SetsockoptInt(windows.Handle(fd), windows.SOL_SOCKET, windows.SO_RCVBUF, socketBufferSize)
-				_ = windows.SetsockoptInt(windows.Handle(fd), windows.SOL_SOCKET, windows.SO_SNDBUF, socketBufferSize)
-			})
+			var socketErr error
+			if err := c.Control(func(fd uintptr) {
+				socketErr = tuneWindowsSocket(windows.Handle(fd))
+			}); err != nil {
+				return err
+			}
+			return socketErr
 		},
 	)
 }
