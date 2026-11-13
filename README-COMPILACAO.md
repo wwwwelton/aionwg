@@ -105,3 +105,33 @@ O Npcap continua sendo instalado separadamente. Nenhum `.conf` é embutido.
 Na validação Windows deste build, o AionWG carregou as DLLs embutidas e abriu
 WinDivert com filtro sem tráfego. A integração do relay Shugo embutida ainda não foi
 validada no Windows (o helper separado foi bloqueado pelo Defender).
+
+## Ajustes de latência no cliente Windows
+
+- `PersistentKeepalive` omitido usa 15 segundos por peer. Valores explícitos,
+  inclusive `0` e `off`, continuam sendo respeitados; o `.conf` não é regravado.
+- O logger WireGuard já descarta mensagens verbosas e conserva os erros.
+- Os sockets UDP externos (RIO e fallback padrão) usam buffers de envio e
+  recepção de 4 MiB e `SIO_UDP_CONNRESET` desativado.
+- DSCP EF 46 é solicitado por destino via qWAVE (`QOSSetOutgoingDSCPValue`),
+  sem shaping nem sondagem adaptativa. Não usa `IP_TOS`, sem suporte adequado
+  no Windows. Exige elevação e qWAVE disponível; falhas são retornadas ao
+  WireGuard, não ocultadas como sucesso. Loopback não recebe marcação.
+  O roteador/ISP pode ignorar ou reescrever DSCP; isso não garante prioridade.
+- O processo elevado usa `HIGH_PRIORITY_CLASS` e GC 400. O limite **suave** de
+  memória Go é o menor entre 512 MiB e 25% da RAM disponível ao iniciar.
+  `GOMEMLIMIT` explícito é preservado. DLLs, buffers RIO e drivers ficam fora
+  desse limite, e o runtime pode ultrapassá-lo. Prioridade alta pode prejudicar
+  outros processos; GC 400 não garante menor jitter.
+- MTU, DNS e `GOMAXPROCS` permanecem inalterados. Não foram adicionados ajustes
+  Linux nem alterações no TCP dos aplicativos encaminhados.
+
+Referência da API:
+https://learn.microsoft.com/en-us/windows/win32/api/qos2/nf-qos2-qossetflow
+
+Os testes Windows de tuning consultam a prioridade, o GC, os buffers e a
+marcação DSCP no sistema. Para o teste DSCP IPv6, defina
+`AIONWG_TEST_IPV6_ENDPOINT` como um destino IPv6 alcançável (`[endereço%zona]:porta`);
+endereços da própria máquina não são aceitos pelo qWAVE neste ambiente.
+Esses testes não comprovam ausência de fragmentação ou melhoria de jitter:
+isso exige medir o túnel real sob carga no link do usuário.
