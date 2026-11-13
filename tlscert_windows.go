@@ -4,7 +4,7 @@ package main
 
 import (
 	"crypto/sha1"
-	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
@@ -25,17 +25,16 @@ const certCN = "DigiCert"
 // is missing from the Root store, then opens the Windows certificate dialog so the
 // user picks the store (the wizard asks for elevation when needed).
 func ensureCertTrusted() error {
-	if _, err := tls.X509KeyPair(tlscert.Cert, tlscert.Key); err != nil {
-		return err
-	}
 	block, _ := pem.Decode(tlscert.Cert)
 	if block == nil {
 		return errors.New("embedded certificate is not PEM")
 	}
+	if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+		return err
+	}
 	sum := sha1.Sum(block.Bytes)
 	thumb := hex.EncodeToString(sum[:])
-	// Match by thumbprint: every build has a new key, so CN alone is not enough.
-	// Accept either store: the wizard may install into the current user's Root.
+	// Accept either store: machine or current user.
 	if rootStoreHas("", thumb) || rootStoreHas("-user", thumb) {
 		return nil
 	}

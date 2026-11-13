@@ -8,7 +8,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -29,15 +28,12 @@ func main() {
 		log.Fatalf("run from the repository root: %v", err)
 	}
 	if !*rotate {
-		_, errC := os.Stat(filepath.Join(dir, "cert.pem"))
-		_, errK := os.Stat(filepath.Join(dir, "key.pem"))
-		if errC == nil && errK == nil {
-			if c, err1 := os.ReadFile(filepath.Join(dir, "cert.pem")); err1 == nil {
-				if k, err2 := os.ReadFile(filepath.Join(dir, "key.pem")); err2 == nil {
-					if _, err := tls.X509KeyPair(c, k); err == nil {
-						log.Print("reusing existing certificate (use -new to rotate)")
-						return
-					}
+		if c, err := os.ReadFile(filepath.Join(dir, "cert.pem")); err == nil {
+			block, _ := pem.Decode(c)
+			if block != nil {
+				if _, err := x509.ParseCertificate(block.Bytes); err == nil {
+					log.Print("reusing existing certificate (use -new to rotate)")
+					return
 				}
 			}
 		}

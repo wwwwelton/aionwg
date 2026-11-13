@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type File struct {
@@ -72,19 +73,27 @@ func extract(base string, files []File) (string, error) {
 }
 
 func verify(path string, expected []byte) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
+	var lastErr error
+	for range 10 {
+		info, err := os.Lstat(path)
+		if err != nil {
+			lastErr = err
+			time.Sleep(5 * time.Millisecond)
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("runtime dependency is not a regular file: %s", path)
+		}
+		actual, err := os.ReadFile(path)
+		if err != nil {
+			lastErr = err
+			time.Sleep(5 * time.Millisecond)
+			continue
+		}
+		if !bytes.Equal(actual, expected) {
+			return fmt.Errorf("runtime dependency differs from embedded bytes: %s", path)
+		}
+		return nil
 	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("runtime dependency is not a regular file: %s", path)
-	}
-	actual, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	if !bytes.Equal(actual, expected) {
-		return fmt.Errorf("runtime dependency differs from embedded bytes: %s", path)
-	}
-	return nil
+	return lastErr
 }
