@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -51,5 +52,37 @@ func TestEmbeddedStandaloneSmoke(t *testing.T) {
 			}
 		}
 		t.Log("loaded verified embedded dependency:", path)
+	}
+}
+
+func TestLiveGamePacketCapture(t *testing.T) {
+	if err := prepareRuntime(); err != nil {
+		t.Fatal(err)
+	}
+	h, err := divertOpen("tcp and (tcp.SrcPort == 13328 or tcp.DstPort == 13328)", divertLayerNetwork, 0, divertFlagSniff|divertFlagRecvOnly)
+	if err != nil {
+		t.Fatal("WinDivert open failed:", err)
+	}
+	defer h.close()
+
+	packetCh := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, 65536)
+		var addr divertAddress
+		n, err := h.recv(buf, &addr)
+		if err == nil && n > 0 {
+			packetCh <- buf[:n]
+		}
+	}()
+
+	select {
+	case pkt := <-packetCh:
+		p, ok := parsePacket(pkt)
+		if !ok {
+			t.Fatal("failed to parse captured packet")
+		}
+		t.Logf("CAPTURED LIVE GAME PACKET: proto=%d %s:%d -> %s:%d len=%d", p.proto, p.src, p.srcPort, p.dst, p.dstPort, len(pkt))
+	case <-time.After(4 * time.Second):
+		t.Log("Sniff handle verified; no packet arrived during 4s window")
 	}
 }
