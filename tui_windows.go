@@ -803,7 +803,25 @@ func udpDupStatus(s Stats) string {
 	if s.FullTunnel {
 		return lipgloss.NewStyle().Foreground(cYellow).Render("pausado: sistema inteiro")
 	}
-	return lipgloss.NewStyle().Foreground(cYellow).Render(fmt.Sprintf("%s · direto %d · perdas %d · erros %d · forcar %v", udpRatioLabel(s.UDPOriginals, s.UDPCopies), s.UDPDupSent, s.UDPDupDropped, s.UDPDupErrors, s.UDPForce))
+	return lipgloss.NewStyle().Foreground(cYellow).Render(fmt.Sprintf("%s · enviadas %d · perdas %d · erros %d · forcar %v", udpRatioLabel(s.UDPOriginals, s.UDPCopies), s.UDPDupSent, s.UDPDupDropped, s.UDPDupErrors, s.UDPForce))
+}
+
+func udpPathsStatus(paths []udpPathStatus) string {
+	parts := make([]string, 0, len(paths))
+	for i, p := range paths {
+		status := "sem resposta"
+		if p.Active {
+			status = "ok"
+			if p.RTT > 0 {
+				status = p.RTT.Round(time.Millisecond).String()
+			}
+			if p.Age > 0 {
+				status += "/" + p.Age.Round(time.Second).String()
+			}
+		}
+		parts = append(parts, fmt.Sprintf("%d:%s (%s)", i+1, p.Endpoint, status))
+	}
+	return strings.Join(parts, " · ")
 }
 
 func mirrorStatus(s Stats) string {
@@ -903,13 +921,22 @@ func (m model) render(level int) string {
 		if level >= 3 {
 			modo = []string{row("Modo", modeStatus(s)+sDim.Render("  ·  ")+flowStatus(s))}
 		}
+		config := sBold.Render(m.engName) + sDim.Render("  · ativo há "+time.Since(m.since).Round(time.Second).String())
+		if level >= 3 && len(s.Paths) > 1 {
+			config += sDim.Render("  · handshake ") + hs
+		}
 		stat = append(stat,
-			row("Config", sBold.Render(m.engName)+sDim.Render("  · ativo há "+time.Since(m.since).Round(time.Second).String())),
+			row("Config", config),
 			row("Endpoint", s.Endpoint+sDim.Render("   túnel ")+s.TunnelAddr+sDim.Render("   [v] troca")),
 			row("Saída", exitStatus(s.Exit)),
-			row("Handshake", hs),
-			row(procLabel, procs),
 		)
+		if level < 3 || len(s.Paths) <= 1 {
+			stat = append(stat, row("Handshake", hs))
+		}
+		stat = append(stat, row(procLabel, procs))
+		if len(s.Paths) > 1 {
+			stat = append(stat, row("Caminhos", "UDP "+udpPathsStatus(s.Paths)))
+		}
 		stat = append(stat, modo...)
 		stat = append(stat,
 			row("Espelho DPS", mirrorStatus(s)),
@@ -937,7 +964,7 @@ func (m model) render(level int) string {
 		stat = append(stat, row("Ordem UDP", fmt.Sprintf("saida recente %v · chegada recente %v", m.settings.UDPNewestOut, m.settings.UDPNewestIn)))
 		br := sDim.Render("desligado ([b] liga)")
 		if m.settings.BestEndpoint {
-			br = lipgloss.NewStyle().Foreground(cGreen).Render("ligado") + sDim.Render(" ([b] desliga) · descobre e confirma por handshake ao conectar")
+			br = lipgloss.NewStyle().Foreground(cGreen).Render("ligado") + sDim.Render(" ([b] desliga) · descobre e confirma candidatos após conectar")
 		}
 		stat = append(stat, row("Melhor rota", br))
 		md := "só jogo  ([s] muda para sistema inteiro)"

@@ -28,14 +28,14 @@ func (e *Engine) runUDPDuplicateWorker() {
 		}
 	}
 
-	e.udpDup.run(e.stop, func(pkt []byte, _ struct{}) error {
+	e.udpDup.run(e.stop, func(pkt []byte, original uint8) error {
 		if e.closing.Load() {
 			return windows.ERROR_OPERATION_ABORTED
 		}
 		// Same SNAT'd packet as the original, through WireGuard (a fresh
 		// transport counter each, so the peer accepts both). pkt is shared
 		// between jobs, so the tunnel gets its own copy.
-		e.tun.inject(clonePktBuf(pkt))
+		e.duplicateTun(original).inject(clonePktBuf(pkt))
 		return nil
 	})
 }

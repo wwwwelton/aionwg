@@ -1,14 +1,8 @@
 package main
 
-// Optional route optimisation, no addresses built in or configured. At connect
-// time the candidates are derived from the profile's endpoint itself: every
-// IPv4 its host name resolves to, plus (for a public endpoint) the addresses
-// with the same host octet in the other /24 blocks of its /22. One ICMP echo
-// ranks them all, medians confirm the best few, and a throwaway WireGuard
-// handshake (engine side) decides which one is really a WireGuard server, since
-// many neighbours answer ping but are unrelated hosts. Nothing changes when the
-// current endpoint is already the fastest, does not answer ICMP, or nothing
-// better completes a handshake.
+// Candidate discovery and ICMP ranking for the route monitor. The connection
+// starts at the configured endpoint; discovery checks alternatives afterwards.
+// A WireGuard handshake confirms whether a candidate is a usable endpoint.
 
 import (
 	"net"
@@ -66,32 +60,6 @@ func endpointCandidates(cur netip.AddrPort, host string, lookup func(string) ([]
 		}
 	}
 	return cands
-}
-
-// learnedCandidates returns cur first, then the distinct IPv4 addresses of the
-// endpoints already proven for the profile. A single result means nothing
-// useful is known yet.
-func learnedCandidates(cur netip.AddrPort, learned []netip.AddrPort) []netip.Addr {
-	cands := []netip.Addr{cur.Addr()}
-	seen := map[netip.Addr]bool{cur.Addr(): true}
-	for _, l := range learned {
-		if a := l.Addr(); a.Is4() && !seen[a] {
-			seen[a] = true
-			cands = append(cands, a)
-		}
-	}
-	return cands
-}
-
-// withLearnedPort gives a ranked address the port it was learned with (the
-// ranking only knows the profile's port).
-func withLearnedPort(ep netip.AddrPort, learned []netip.AddrPort) netip.AddrPort {
-	for _, l := range learned {
-		if l.Addr() == ep.Addr() {
-			return l
-		}
-	}
-	return ep
 }
 
 type rankedEndpoint struct {

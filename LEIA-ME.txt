@@ -25,21 +25,14 @@ Teclas
   [w]      liga/desliga o modo WFP (só os apps marcados passam pelo túnel)
   [l]      lista de programas abertos para marcar no modo WFP
   [n]      liga/desliga o DNS pelo túnel (modo sistema inteiro)
-  [b]      liga/desliga "melhor endpoint" (vale na próxima conexão). Fluxo:
-           1) ao iniciar a conexão procura o endpoint de menor ping: primeiro os já
-              aprendidos (%APPDATA%\AionWG\routes.json); sem nenhum, os IPs do nome
-              e os 3 vizinhos do mesmo bloco /22. Mede por ICMP e confirma por
-              handshake; quem falha fica 7 dias fora da busca;
-           2) conecta no escolhido (se nada melhor provar funcionar, no da config);
-           3) conectado, a cada 30 s e com o jogo em andamento, mede os endpoints
-              provados e, se um for ao menos 5 ms mais rápido, troca e compara o
-              ping REAL do jogo antes e depois: só mantém se melhorar 2 ms; senão
-              volta (no máx. 1 tentativa a cada 3 min; 10 min após falha). Com o
-              jogo PARADO, procura 1 endpoint novo a cada 10 min (a sonda de
-              handshake não atrapalha partida) e o aprende se funcionar.
-           O .conf nunca é alterado e nenhum IP vem embutido.
-  [v]      troca o endpoint do túnel em andamento (IP ou IP:porta). Só vale nesta
-           sessão: o .conf não é alterado. Confirma o handshake; se falhar, desfaz.
+  [b]      liga/desliga "melhor endpoint" (vale na próxima conexão). A conexão
+           inicia no endpoint do .conf. Com o jogo em andamento, reavalia os
+           endpoints conhecidos a cada 30 s; testa uma troca e só a mantém se
+           o ping do jogo melhorar. Com o jogo parado, procura novos endpoints a
+           cada 10 s e confirma candidatos por handshake.
+  [v]      troca o endpoint principal durante a conexão (IP ou IP:porta).
+           A alteração não é gravada no .conf. Endpoints já usados pelos outros
+           caminhos UDP não podem ser escolhidos para o principal.
   [m]      liga/desliga o espelho para DPS meter
   [x]      autoteste: DNS, IP de saída, Steam, download e upload pelo túnel
   [g]      painel de diagnóstico (contadores)
@@ -65,6 +58,26 @@ IMPORTANTE
   * O servidor WireGuard precisa fazer NAT/encaminhamento para a internet
     (wg-easy, PiVPN, scripts "wireguard-install" já fazem). O AllowedIPs da
     config deve cobrir os IPs do jogo (0.0.0.0/0 é o mais simples).
+
+Quatro caminhos UDP do WARP
+  Para um perfil WARP com um peer, o AionWG cria quatro sessões WireGuard em
+  sockets UDP e endpoints distintos. A primeira usa o endpoint do .conf; as
+  demais usam endpoints aprendidos ou candidatos WARP. Outros perfis continuam
+  com o único caminho configurado.
+  Os caminhos adicionais são sondados um de cada vez, a intervalos de 10 s,
+  por ICMP até o DNS da Cloudflare através do túnel.
+  A linha "Caminhos UDP" mostra o endpoint e só informa sucesso após resposta
+  de dados pelo túnel; o tempo após a barra indica há quanto tempo ela chegou.
+  O estado expira após 75 s; handshake isolado não comprova o funcionamento.
+  Um caminho sem resposta pode ser substituído por outro candidato.
+  Novos fluxos são distribuídos entre os caminhos que respondem. Um fluxo usa
+  o mesmo caminho enquanto ele responde; se parar, o principal é usado. Com
+  [u] ligado, as cópias UDP podem usar os outros caminhos ativos.
+  As quatro sessões usam a mesma chave e endereço do perfil: a Cloudflare pode
+  não aceitar sessões simultâneas independentes ou pode limitá-las. Os
+  endpoints podem compartilhar a mesma saída, e cópias em caminhos diferentes
+  podem chegar ao jogo com IPs públicos distintos. Não há garantia de ping
+  menor; monitore os estados e desligue [u] se houver instabilidade.
 
 Modo sistema inteiro ([s])
   Todo o tráfego do PC passa pelo túnel, como um VPN normal. Continua direto:

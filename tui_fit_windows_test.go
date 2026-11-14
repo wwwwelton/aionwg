@@ -4,6 +4,7 @@ package main
 
 import (
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,6 +26,12 @@ func connectedModel(w, h int) model {
 	m.stats.Route = RouteTrace{At: time.Now(), Endpoint: netip.MustParseAddr("1.1.1.1"), Dest: netip.MustParseAddr("2.2.2.2"), Direct: hops, Tunnel: hops}
 	m.stats.MirrorOn = true
 	m.stats.MirrorAck = MirrorRTT{Last: 14 * time.Millisecond, Avg: 14 * time.Millisecond, N: 5}
+	m.stats.Paths = []udpPathStatus{
+		{Endpoint: netip.MustParseAddrPort("162.159.192.1:2408"), Active: true},
+		{Endpoint: netip.MustParseAddrPort("188.114.96.1:2408"), Active: true, RTT: 15 * time.Millisecond, Age: 31 * time.Second},
+		{Endpoint: netip.MustParseAddrPort("188.114.97.1:2408")},
+		{Endpoint: netip.MustParseAddrPort("188.114.98.1:2408")},
+	}
 	m.histPing = []float64{14, 15, 14, 16}
 	for i := 0; i < 20; i++ {
 		m.logs = append(m.logs, "linha de log")
@@ -44,8 +51,14 @@ func TestViewFitsTerminalHeight(t *testing.T) {
 		if !fits {
 			t.Errorf("%dx%d: no layout level fits", sz[0], sz[1])
 		}
-		if got := lipgloss.Height(m.View()); got > sz[1] {
+		view := m.View()
+		if got := lipgloss.Height(view); got > sz[1] {
 			t.Errorf("%dx%d: view height %d exceeds the terminal", sz[0], sz[1], got)
+		}
+		for _, path := range m.stats.Paths {
+			if !strings.Contains(view, path.Endpoint.String()) {
+				t.Errorf("%dx%d: endpoint %s is not visible", sz[0], sz[1], path.Endpoint)
+			}
 		}
 	}
 }

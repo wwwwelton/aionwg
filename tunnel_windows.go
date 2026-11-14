@@ -41,14 +41,16 @@ import (
 // ---------------------------------------------------------------- engine
 
 type natEntry struct {
-	local    netip.Addr
-	remote   netip.Addr
-	dnsOrig  netip.Addr // valid when a DNS query was redirected to the tunnel DNS
-	game     bool       // flow belongs to the game (mirror, game ping, game stats)
-	class    uint8
-	ifIdx    uint32
-	subIfIdx uint32
-	last     time.Time
+	local      netip.Addr
+	remote     netip.Addr
+	remotePort uint16
+	path       uint8
+	dnsOrig    netip.Addr // valid when a DNS query was redirected to the tunnel DNS
+	game       bool       // flow belongs to the game (mirror, game ping, game stats)
+	class      uint8
+	ifIdx      uint32
+	subIfIdx   uint32
+	last       time.Time
 }
 
 // natKey separates IPv4/IPv6 sockets that share a port number.
@@ -76,7 +78,7 @@ type EngineOptions struct {
 	WFPApps      []string // executables the user picked for WFP mode
 	ConfigPath   string   // imported profile receiving learned WFP destinations
 	ConfigPaths  []string
-	BestEndpoint bool // at connect, use the lowest-latency endpoint (see bestendpoint.go)
+	BestEndpoint bool // monitor and try faster endpoints while connected
 }
 
 // Diag are counters for the diagnostics panel.
@@ -144,11 +146,13 @@ type Stats struct {
 	RouteMonitor     bool       // best-endpoint option active for this connection
 	RouteNote        string     // last route monitor / endpoint switch message
 	Exit             ExitInfo   // where the tunnel exits (zero until measured)
+	Paths            []udpPathStatus
 }
 
 type outboundUDPJob struct {
 	packet  []byte // original routed packet, already SNAT'd for WireGuard
 	copyUDP []byte // optional copy of packet for the secondary (duplicate) send
+	path    uint8
 }
 
 type Engine struct {
@@ -164,7 +168,9 @@ type Engine struct {
 	shugoMu      sync.Mutex
 	shugo        *shugoCompat  // Shugo.gg relay view; exists only while [m] is on
 	shugoOld     chan struct{} // done of the last supervisor being stopped in the background
-	udpDup       *udpDuplicator[struct{}]
+	udpDup       *udpDuplicator[uint8]
+	paths        [maxPaths - 1]*udpPath
+	dupPath      atomic.Uint64
 	udpForce     atomic.Bool
 	latestOut    atomic.Bool
 	latestIn     atomic.Bool
@@ -301,7 +307,7 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 	e.maxMSS6 = uint16(conf.MTU - 60)
 
 	profileKey := filepath.Base(opt.ConfigPath)
-	var learnedEPs []netip.AddrPort // proven for this profile: tried first, no neighbour sweep
+	var learnedEPs []netip.AddrPort
 	if opt.BestEndpoint {
 		learnedEPs = loadRoutes(routesPath(), profileKey)
 	}
@@ -310,23 +316,12 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 		if err != nil {
 			return nil, err
 		}
-		profileEP := ep
-		if opt.BestEndpoint && ep.Addr().Is4() {
-			var learned []netip.AddrPort
-			if len(e.endpoints) == 0 {
-				learned = learnedEPs
-			}
-			ep = chooseEndpoint(conf, p, ep, profileKey, learned, logf)
-		}
 		if len(e.endpoints) == 0 {
 			e.profile = profileKey
-			e.learned = map[netip.AddrPort]bool{profileEP: true, ep: true}
+			e.learned = map[netip.AddrPort]bool{ep: true}
 			if opt.BestEndpoint {
 				for _, r := range learnedEPs {
 					e.learned[r] = true
-				}
-				if ep != profileEP {
-					_ = saveRoute(routesPath(), e.profile, ep)
 				}
 			}
 		}
@@ -357,7 +352,7 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 	e.owner = newOwnerTracker(opt.Processes)
 	e.mirror = newMirror(opt.Mirror, logf)
 	e.mirror.trace = e.logDisk
-	e.udpDup = newUDPDuplicator[struct{}](udpDupQueueSize, opt.UDPDuplicate)
+	e.udpDup = newUDPDuplicator[uint8](udpDupQueueSize, opt.UDPDuplicate)
 	e.udpDup.setRatio(opt.UDPOriginals, opt.UDPCopies)
 	e.udpForce.Store(opt.UDPForce)
 	e.latestOut.Store(opt.UDPNewestOut)
@@ -404,6 +399,10 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 			}
 		}
 	}
+	if err := e.startUDPPaths(); err != nil {
+		e.Close()
+		return nil, err
+	}
 
 	for i := 0; i < 4; i++ {
 		e.wg.Add(1)
@@ -419,15 +418,19 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 		e.wg.Add(1)
 		go func() { defer e.wg.Done(); e.routeLoop() }()
 	}
+	if e.paths[0] != nil {
+		e.wg.Add(1)
+		go func() { defer e.wg.Done(); e.pathLoop() }()
+	}
 	e.wg.Add(3)
 	go e.runUDPDuplicateWorker()
 	go func() {
 		defer e.wg.Done()
 		e.outboundQ.run(e.stop, func(job outboundUDPJob) {
 			if !e.closing.Load() {
-				e.tun.inject(job.packet)
+				e.pathTun(job.path).inject(job.packet)
 				if len(job.copyUDP) > 0 && e.udpDup != nil {
-					e.udpDup.offer(job.copyUDP, struct{}{})
+					e.udpDup.offer(job.copyUDP, job.path)
 				}
 				putPktBuf(job.copyUDP)
 			} else {
@@ -451,7 +454,7 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 	}
 	logf("túnel ativo · endpoint %s · filtro WinDivert aberto", e.endpoints[0])
 	if opt.BestEndpoint {
-		logf("rota: [3/3] busca dinâmica ativa: reavalia os endpoints conhecidos a cada %v; procura novos a cada %v quando o jogo está parado", routeEvery, discoverEvery)
+		logf("rota: busca dinâmica ativa: reavalia os endpoints conhecidos a cada %v; procura novos a cada %v quando o jogo está parado", routeEvery, discoverEvery)
 	}
 	return e, nil
 }
@@ -530,6 +533,14 @@ func (e *Engine) capture(pkt []byte, addr *divertAddress) bool {
 		if uint32(p.srcPort) == e.ownUDP.Load() {
 			return false
 		}
+		for _, path := range e.paths {
+			if path != nil {
+				ep := path.currentEndpoint()
+				if p.srcPort == path.port || (p.dstPort == ep.Port() && p.dst == ep.Addr()) {
+					return false
+				}
+			}
+		}
 		for _, ep := range e.eps() {
 			if p.dstPort == ep.Port() && p.dst == ep.Addr() {
 				return false
@@ -575,7 +586,7 @@ func (e *Engine) capture(pkt []byte, addr *divertAddress) bool {
 			cp := clonePktBuf(pkt[:pktLen(pkt, &p)])
 			setSrc(cp, &p, src)
 			fixChecksums(cp, &p)
-			e.udpDup.offer(cp, struct{}{})
+			e.udpDup.offer(cp, 0)
 			putPktBuf(cp)
 		}
 		return false
@@ -592,12 +603,18 @@ func (e *Engine) capture(pkt []byte, addr *divertAddress) bool {
 	e.natMu.Lock()
 	ne := e.nat[k]
 	if ne == nil {
-		ne = &natEntry{}
+		ne = &natEntry{path: e.selectPath(k)}
 		e.nat[k] = ne
+	} else if ne.remote != p.dst || ne.remotePort != p.dstPort {
+		ne.path = e.selectPath(k)
 	}
-	ne.local, ne.remote, ne.dnsOrig, ne.game, ne.class = p.src, p.dst, dnsOrig, isGame, class
+	if ne.path > 0 && e.pathTun(ne.path) == e.tun {
+		ne.path = 0
+	}
+	ne.local, ne.remote, ne.remotePort, ne.dnsOrig, ne.game, ne.class = p.src, p.dst, p.dstPort, dnsOrig, isGame, class
 	ne.ifIdx, ne.subIfIdx = addr.IfIdx, addr.SubIfIdx
 	ne.last = time.Now()
+	path := ne.path
 	e.natMu.Unlock()
 
 	setSrc(out, &p, src)
@@ -625,7 +642,7 @@ func (e *Engine) capture(pkt []byte, addr *divertAddress) bool {
 		}
 		e.cCaptured.Add(1)
 		if isGame && p.proto == protoUDP && e.latestOut.Load() && e.outboundQ != nil {
-			job := outboundUDPJob{packet: q}
+			job := outboundUDPJob{packet: q, path: path}
 			if eligibleCopy {
 				// Keep the source buffer alive for the asynchronous worker.
 				job.copyUDP = clonePktBuf(q) // before offer: the queue takes ownership of q
@@ -634,9 +651,9 @@ func (e *Engine) capture(pkt []byte, addr *divertAddress) bool {
 		} else {
 			if eligibleCopy {
 				// Queue the copy before inject: inject hands q to the tunnel, which recycles it.
-				e.udpDup.offer(q, struct{}{})
+				e.udpDup.offer(q, path)
 			}
-			e.tun.inject(q)
+			e.pathTun(path).inject(q)
 		}
 	}
 	return true
@@ -965,6 +982,23 @@ func (e *Engine) Stats() Stats {
 		Procs:      e.owner.Processes(),
 		Endpoint:   e.eps()[0].String(),
 	}
+	s.Paths = append(s.Paths, udpPathStatus{Endpoint: e.eps()[0]})
+	for _, path := range e.paths {
+		if path != nil {
+			now := time.Now()
+			last := path.lastRx.Load()
+			var age time.Duration
+			if last > 0 {
+				age = now.Sub(time.Unix(0, last))
+			}
+			s.Paths = append(s.Paths, udpPathStatus{
+				Endpoint: path.currentEndpoint(),
+				Active:   path.active(now),
+				RTT:      time.Duration(path.rtt.Load()),
+				Age:      age,
+			})
+		}
+	}
 	if rt := e.trace.Load(); rt != nil {
 		s.Route = *rt
 	}
@@ -1001,6 +1035,11 @@ func (e *Engine) Stats() Stats {
 		TunDrop: e.tun.drops.Load(), Segmented: e.cSegmented.Load(),
 		ICMPErr: e.cICMPErr.Load(), DNSQ: e.cDNSQ.Load(), DNSA: e.cDNSA.Load(),
 		TableDumps: e.owner.Dumps(), V6Blocked: e.cV6Block.Load(),
+	}
+	for _, path := range e.paths {
+		if path != nil {
+			s.Diag.TunDrop += path.tun.drops.Load()
+		}
 	}
 	sort.Slice(s.Procs, func(i, j int) bool { return s.Procs[i].PID < s.Procs[j].PID })
 
@@ -1054,22 +1093,34 @@ func (e *Engine) Stats() Stats {
 		s.PingGameDirect = ps.result()
 	}
 	e.pingMu.Unlock()
+	s.Paths[0].Active = s.PingTunnel.OK
 
-	if uapi, err := e.dev.IpcGet(); err == nil {
-		sc := bufio.NewScanner(strings.NewReader(uapi))
-		for sc.Scan() {
-			k, v, _ := strings.Cut(sc.Text(), "=")
-			n, _ := strconv.ParseInt(v, 10, 64)
-			switch k {
-			case "rx_bytes":
-				s.WGRx += uint64(n)
-			case "tx_bytes":
-				s.WGTx += uint64(n)
-			case "last_handshake_time_sec":
-				if n > 0 {
-					t := time.Unix(n, 0)
-					if t.After(s.Handshake) {
-						s.Handshake = t
+	devices := [maxPaths]*device.Device{e.dev}
+	for i, path := range e.paths {
+		if path != nil {
+			devices[i+1] = path.dev
+		}
+	}
+	for _, dev := range devices {
+		if dev == nil {
+			continue
+		}
+		if uapi, err := dev.IpcGet(); err == nil {
+			sc := bufio.NewScanner(strings.NewReader(uapi))
+			for sc.Scan() {
+				k, v, _ := strings.Cut(sc.Text(), "=")
+				n, _ := strconv.ParseInt(v, 10, 64)
+				switch k {
+				case "rx_bytes":
+					s.WGRx += uint64(n)
+				case "tx_bytes":
+					s.WGTx += uint64(n)
+				case "last_handshake_time_sec":
+					if n > 0 {
+						t := time.Unix(n, 0)
+						if t.After(s.Handshake) {
+							s.Handshake = t
+						}
 					}
 				}
 			}
@@ -1280,6 +1331,9 @@ func (e *Engine) SetEndpoint(ep netip.AddrPort) error {
 	if e.closing.Load() {
 		return errors.New("túnel fechando")
 	}
+	if e.pathEndpointUsed(ep) {
+		return fmt.Errorf("endpoint %s já está em outro caminho UDP", ep)
+	}
 	prev := e.eps()
 	if prev[0] == ep {
 		return nil
@@ -1330,6 +1384,11 @@ func (e *Engine) Close() {
 	}
 	if e.dev != nil {
 		e.dev.Close()
+	}
+	for _, path := range e.paths {
+		if path != nil {
+			path.close()
+		}
 	}
 	e.wg.Wait()
 	if e.h != 0 {
@@ -1481,40 +1540,6 @@ func probeHandshake(conf *WGConf, p PeerConf, ep netip.AddrPort, wait time.Durat
 	return false
 }
 
-// chooseEndpoint is the optional route optimisation. Endpoints already proven
-// for the profile are tried first and make the neighbour search unnecessary;
-// without any, ICMP ranks dynamically discovered candidates (minus the ones
-// that recently failed a handshake). Either way a throwaway handshake confirms
-// the choice. It returns ep unchanged when nothing better is proven.
-func chooseEndpoint(conf *WGConf, p PeerConf, ep netip.AddrPort, profile string, learned []netip.AddrPort, logf func(string, ...any)) netip.AddrPort {
-	logf("rota: [1/3] procurando o endpoint de menor ping antes de conectar…")
-	host, _, _ := net.SplitHostPort(p.Endpoint)
-	cands := learnedCandidates(ep, learned)
-	if len(cands) == 1 {
-		cands = endpointCandidates(ep, host, lookupIPv4)
-	}
-	cands = dropAddrs(cands, loadBad(routesPath(), profile, time.Now()))
-	curRTT, ranked := rankEndpoints(ep, cands, icmpOnce, icmpMedian)
-	switch {
-	case curRTT == 0:
-		logf("rota: endpoint %s não responde a ICMP; mantido", ep.Addr())
-	case len(ranked) == 0:
-		logf("rota: endpoint %s já é o mais rápido (%v, %d testados)", ep.Addr(), curRTT, len(cands))
-	default:
-		for _, r := range ranked {
-			cand := withLearnedPort(r.AddrPort, learned)
-			if probeHandshake(conf, p, cand, 2*time.Second) {
-				logf("rota: endpoint %s (%v) trocado por %s (%v, handshake ok)", ep.Addr(), curRTT, cand.Addr(), r.RTT)
-				return cand
-			}
-			_ = saveBad(routesPath(), profile, cand, time.Now())
-			logf("rota: %s (%v) respondeu a ICMP mas não ao WireGuard; descartado por 7 dias", r.Addr(), r.RTT)
-		}
-		logf("rota: nenhuma alternativa completou o handshake; mantido %s", ep.Addr())
-	}
-	return ep
-}
-
 // learn remembers an endpoint proven by a handshake, for this session and (per
 // profile, outside the .conf) for the next ones.
 func (e *Engine) learn(ep netip.AddrPort) {
@@ -1593,7 +1618,7 @@ func (e *Engine) routeLoop() {
 		}
 		legs := map[netip.AddrPort]time.Duration{}
 		for _, a := range e.learnedList() {
-			if a == cur {
+			if a == cur || e.pathEndpointUsed(a) {
 				continue
 			}
 			if leg, ok := legProbe(a.Addr()); ok {
@@ -1830,6 +1855,11 @@ func (e *Engine) discoverIdle() {
 	skip := loadBad(routesPath(), e.profile, time.Now())
 	for _, l := range e.learnedList() {
 		skip[l.Addr()] = true
+	}
+	for _, path := range e.paths {
+		if path != nil {
+			skip[path.currentEndpoint().Addr()] = true
+		}
 	}
 	known := endpointCandidates(cur, host, lookupIPv4)
 	seen := map[netip.Addr]bool{}
