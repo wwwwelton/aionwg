@@ -308,7 +308,7 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 			if len(e.endpoints) == 0 {
 				learned = learnedEPs
 			}
-			ep = chooseEndpoint(conf, p, ep, learned, logf)
+			ep = chooseEndpoint(conf, p, ep, profileKey, learned, logf)
 		}
 		if len(e.endpoints) == 0 {
 			e.profile = profileKey
@@ -438,6 +438,9 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 		e.requestMeter()
 	}
 	logf("túnel ativo · endpoint %s · filtro WinDivert aberto", e.endpoints[0])
+	if opt.BestEndpoint {
+		logf("rota: [3/3] busca dinâmica ativa: reavalia os endpoints conhecidos a cada %v e procura novos quando o jogo está parado", routeEvery)
+	}
 	return e, nil
 }
 
@@ -1415,16 +1418,18 @@ func probeHandshake(conf *WGConf, p PeerConf, ep netip.AddrPort, wait time.Durat
 }
 
 // chooseEndpoint is the optional route optimisation. Endpoints already proven
-// for the profile are tried first and make the neighbour sweep unnecessary;
-// without any, ICMP ranks dynamically discovered candidates. Either way a
-// throwaway handshake confirms the choice. It returns ep unchanged when
-// nothing better is proven.
-func chooseEndpoint(conf *WGConf, p PeerConf, ep netip.AddrPort, learned []netip.AddrPort, logf func(string, ...any)) netip.AddrPort {
+// for the profile are tried first and make the neighbour search unnecessary;
+// without any, ICMP ranks dynamically discovered candidates (minus the ones
+// that recently failed a handshake). Either way a throwaway handshake confirms
+// the choice. It returns ep unchanged when nothing better is proven.
+func chooseEndpoint(conf *WGConf, p PeerConf, ep netip.AddrPort, profile string, learned []netip.AddrPort, logf func(string, ...any)) netip.AddrPort {
+	logf("rota: [1/3] procurando o endpoint de menor ping antes de conectar…")
 	host, _, _ := net.SplitHostPort(p.Endpoint)
 	cands := learnedCandidates(ep, learned)
 	if len(cands) == 1 {
 		cands = endpointCandidates(ep, host, lookupIPv4)
 	}
+	cands = dropAddrs(cands, loadBad(routesPath(), profile, time.Now()))
 	curRTT, ranked := rankEndpoints(ep, cands, icmpOnce, icmpMedian)
 	switch {
 	case curRTT == 0:
@@ -1438,7 +1443,8 @@ func chooseEndpoint(conf *WGConf, p PeerConf, ep netip.AddrPort, learned []netip
 				logf("rota: endpoint %s (%v) trocado por %s (%v, handshake ok)", ep.Addr(), curRTT, cand.Addr(), r.RTT)
 				return cand
 			}
-			logf("rota: %s (%v) respondeu a ICMP mas não ao WireGuard; descartado", r.Addr(), r.RTT)
+			_ = saveBad(routesPath(), profile, cand, time.Now())
+			logf("rota: %s (%v) respondeu a ICMP mas não ao WireGuard; descartado por 7 dias", r.Addr(), r.RTT)
 		}
 		logf("rota: nenhuma alternativa completou o handshake; mantido %s", ep.Addr())
 	}
@@ -1490,6 +1496,7 @@ func (e *Engine) routeLoop() {
 	tk := time.NewTicker(routeEvery)
 	defer tk.Stop()
 	var next time.Time
+	lastDiscover := time.Now() // the connect step already searched
 	for {
 		select {
 		case <-e.stop:
@@ -1497,7 +1504,17 @@ func (e *Engine) routeLoop() {
 		case <-tk.C:
 		}
 		gs := e.gameServer()
-		if e.closing.Load() || !gs.IsValid() || time.Now().Before(next) {
+		if e.closing.Load() {
+			continue
+		}
+		if !gs.IsValid() { // no game traffic: the safe moment to look for new endpoints
+			if time.Since(lastDiscover) >= discoverEvery {
+				lastDiscover = time.Now()
+				e.discoverIdle()
+			}
+			continue
+		}
+		if time.Now().Before(next) {
 			continue
 		}
 		cur := e.eps()[0]
@@ -1723,4 +1740,36 @@ func pingMs(p PingResult) int {
 		return 0
 	}
 	return max(1, int(p.RTT.Milliseconds()))
+}
+
+// discoverIdle looks for an endpoint faster than the current one while the game
+// has no traffic, so the throwaway handshake cannot disturb a match. It tries
+// at most one candidate per call and remembers the result (learned or failed).
+func (e *Engine) discoverIdle() {
+	cur := e.eps()[0]
+	if !cur.Addr().Is4() || len(e.conf.Peers) == 0 {
+		return
+	}
+	p := e.conf.Peers[0]
+	host, _, _ := net.SplitHostPort(p.Endpoint)
+	skip := loadBad(routesPath(), e.profile, time.Now())
+	for _, l := range e.learnedList() {
+		skip[l.Addr()] = true
+	}
+	cands := dropAddrs(endpointCandidates(cur, host, lookupIPv4), skip)
+	if len(cands) < 2 {
+		return
+	}
+	curRTT, ranked := rankEndpoints(cur, cands, icmpOnce, icmpMedian)
+	if curRTT == 0 || len(ranked) == 0 || e.gameServer().IsValid() {
+		return // nothing faster, or the game started meanwhile
+	}
+	r := ranked[0]
+	if probeHandshake(e.conf, p, r.AddrPort, 2*time.Second) {
+		e.learn(r.AddrPort)
+		e.routeLog("rota: novo endpoint aprendido %s (perna direta %v contra %v); o monitor passa a considerá-lo", r.Addr(), r.RTT, curRTT)
+		return
+	}
+	_ = saveBad(routesPath(), e.profile, r.AddrPort, time.Now())
+	e.routeLog("rota: %s (%v) respondeu a ICMP mas não ao WireGuard; descartado por 7 dias", r.Addr(), r.RTT)
 }
