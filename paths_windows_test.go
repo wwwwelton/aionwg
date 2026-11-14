@@ -168,12 +168,14 @@ func TestUDPPathFailureKeepsTheFlowOnTheFallback(t *testing.T) {
 	dst := netip.MustParseAddr("203.0.113.10")
 	key := portKey{proto: protoUDP, port: 40000}
 	e := &Engine{
-		conf:  &WGConf{Peers: []PeerConf{{AllowedIPs: []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")}}}},
-		addr4: netip.MustParseAddr("172.16.0.2"),
-		tun:   newSplitTun(1420),
-		owner: &ownerTracker{cache: map[portKey]ownerEntry{key: {class: classApp, expires: time.Now().Add(time.Minute)}}},
-		nat:   map[portKey]*natEntry{key: {remote: dst, remotePort: 7000, path: 1}},
+		conf:   &WGConf{Peers: []PeerConf{{AllowedIPs: []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")}}}},
+		addr4:  netip.MustParseAddr("172.16.0.2"),
+		tun:    newSplitTun(1420),
+		owner:  &ownerTracker{cache: map[portKey]ownerEntry{key: {class: classApp, expires: time.Now().Add(time.Minute)}}},
+		nat:    map[portKey]*natEntry{key: {remote: dst, remotePort: 7000, path: 1}},
+		mirror: newMirror(false, func(string, ...any) {}),
 	}
+	defer e.mirror.Close()
 	e.epCur.Store(&[]netip.AddrPort{netip.MustParseAddrPort("162.159.192.1:2408")})
 	p := &udpPath{port: 40111, tun: newSplitTun(1420)}
 	ep := netip.MustParseAddrPort("188.114.96.1:2408")
