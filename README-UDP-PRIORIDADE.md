@@ -6,13 +6,13 @@ Esta edição mantém as correções anteriores de DNS/Mirror e estende a cópia
 
 | Tecla | Função | Padrão |
 |---|---|---|
-| `U` | Liga/desliga cópias adicionais UDP do jogo na rota direta do Windows | Desligado |
+| `U` | Liga/desliga cópias adicionais UDP do jogo pelo túnel WireGuard | Desligado |
 | `R` | Escolhe de **1 a 8 cópias extras por original** (`1:1`, `2:1`… `8:1`) | `1:1` |
-| `F` | Força **cópias UDP extras** também para destinos do jogo fora de `AllowedIPs` (somente rota direta e sem afetar o pacote original) | Desligado |
+| `F` | Força **cópias UDP extras** também para destinos do jogo fora de `AllowedIPs` (o original segue pela rota normal do Windows; só as cópias vão pelo túnel, então o servidor pode ver dois IPs públicos) | Desligado |
 | `O` | Reorganização do **envio UDP principal**, mais recente primeiro | Desligado |
 | `A` | Reorganização da **chegada UDP principal**, mais recente primeiro | Desligado |
 
-**Interpretação de proporção:** `1:1` = 1 datagrama UDP original + 1 cópia direta; `2:1` = 1 original + 2 cópias; `8:1` = 1 original + 8 cópias. Todas as cópias extras usam a fila secundária, fora da goroutine de captura.
+**Interpretação de proporção:** `1:1` = 1 datagrama UDP original + 1 cópia pelo túnel; `2:1` = 1 original + 2 cópias; `8:1` = 1 original + 8 cópias. Todas as cópias extras usam a fila secundária, fora da goroutine de captura.
 
 **Forçar UDP não converte TCP em UDP.** Apenas tenta gerar cópias adicionais do UDP dos executáveis classificados como **jogo**, mesmo se o destino não estiver em `AllowedIPs`. Exclui DNS (porta 53), LAN, multicast, endpoint VPN e modo sistema inteiro. Para ter efeito, `U` deve estar ligado. Pode revelar o IP público do cliente ao destino e provocar rejeição de sessão.
 

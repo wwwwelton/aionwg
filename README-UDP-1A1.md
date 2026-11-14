@@ -3,14 +3,14 @@
 ## O que foi implementado
 
 O AionWG continua encaminhando os pacotes originais do **AION 2** via WireGuard.
-Quando a opção experimental **[u] UDP 1:1** está ativa, cada datagrama **UDP de saída do jogo** aceito no túnel pode gerar **uma cópia idêntica** no caminho direto de saída do Windows.
+Quando a opção experimental **[u] UDP 1:1** está ativa, cada datagrama **UDP de saída do jogo** aceito no túnel pode gerar **uma cópia idêntica** pelo túnel WireGuard (mesmo IP público do original).
 
 - O envio principal é **prioritário**: o pacote do jogo é submetido primeiro à fila WireGuard.
 - A cópia é encaminhada por **uma goroutine vinculada a um thread do Windows de prioridade reduzida**.
 - A fila é limitada a 256 itens; quando cheia, **descarta a cópia**, não o pacote principal.
 - Só duplica UDP da classe jogo; **não duplica TCP, Steam, DNS (porta 53), nem tráfego no modo sistema inteiro**.
 - Ativa/desativa em tempo real com `[u]` e salva a escolha em `%APPDATA%\AionWG\settings.json` (`"udp_duplicate": true/false`). **Padrão: OFF.**
-- Painel indica cópias diretas enviadas, descartadas e erros.
+- Painel indica cópias enviadas, descartadas e erros.
 
 ## Roteamento real e limitações
 
@@ -23,7 +23,7 @@ AION2.exe -> WinDivert -> pacote original -> WireGuard -> VPS -> servidor
 
 O segundo caminho passa pelo **roteamento normal do Windows**. Não significa uma segunda interface física garantida: no layer NETWORK, o `IfIdx` de pacotes de saída é ignorado pelo WinDivert. Se outra VPN estiver alterando a rota padrão, a saída direta poderá não ser independente. Para redundância multipath real com dois ISPs/VPSs e escolha do pacote mais rápido, seria necessário um protocolo com **deduplicação e sessão no destino**, não apenas a reinjeção local.
 
-**Não há garantia de ping menor, igual ou melhora do jogo.** A cópia pode usar banda/CPU, chegar depois, ser descartada pelo servidor ou causar duplicação de comandos/respostas. O servidor pode ver **dois IPs públicos diferentes para a mesma sessão**. Há riscos de incompatibilidade com anticheat/regras do jogo. Teste primeiro fora de partidas competitivas e desative `[u]` se notar desconexões, instabilidade ou aumento de jitter. **Não use a duplicação como configuração padrão.**
+**Não há garantia de ping menor, igual ou melhora do jogo.** A cópia pode usar banda/CPU, chegar depois, ser descartada pelo servidor ou causar duplicação de comandos/respostas. Há riscos de incompatibilidade com anticheat/regras do jogo. Teste primeiro fora de partidas competitivas e desative `[u]` se notar desconexões, instabilidade ou aumento de jitter. **Não use a duplicação como configuração padrão.**
 
 ## Instalação via PowerShell 7 (ZIP completo)
 
