@@ -45,6 +45,25 @@ jobs:
         run: ./build-embedded.sh
       - name: Verify certificate unchanged
         run: sha256sum -c "$RUNNER_TEMP/cert.sha256"
+      - name: Sign EXE with release certificate
+        env:
+          AIONWG_PFX_B64: ${{ secrets.AIONWG_PFX_B64 }}
+          AIONWG_PFX_PW: ${{ secrets.AIONWG_PFX_PW }}
+        run: |
+          set -euo pipefail
+          [ -n "$AIONWG_PFX_B64" ] && [ -n "$AIONWG_PFX_PW" ] || { echo "::error::AIONWG_PFX_B64 and AIONWG_PFX_PW secrets are required"; exit 1; }
+          sudo apt-get install -y osslsigncode
+          pfx="$RUNNER_TEMP/sign.pfx"
+          printf '%s' "$AIONWG_PFX_B64" | base64 -d > "$pfx"
+          osslsigncode sign -pkcs12 "$pfx" -pass "$AIONWG_PFX_PW" -h sha256 \
+            -in dist/standalone/AionWG.exe -out dist/standalone/AionWG-signed.exe
+          mv -f dist/standalone/AionWG-signed.exe dist/standalone/AionWG.exe
+          rm -f "$pfx"
+      - name: Repack zip with signed EXE
+        run: |
+          set -euo pipefail
+          rm -f dist/AionWG-standalone-windows-x64.zip
+          (cd dist/standalone && zip -q ../AionWG-standalone-windows-x64.zip AionWG.exe WinDivert-LICENSE.txt WireGuard-go-LICENSE.txt)
       - name: Compute next version
         id: version
         run: |
