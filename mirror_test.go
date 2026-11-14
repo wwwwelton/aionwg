@@ -112,3 +112,68 @@ func TestMirrorLoopback(t *testing.T) {
 	}
 	t.Fatalf("c2s=%q s2c=%q", got[dirC2S].String(), got[dirS2C].String())
 }
+
+func feedPkt(m *mirror, out bool, pkt []byte) {
+	p, ok := parsePacket(pkt)
+	if ok {
+		m.packet(out, pkt, &p)
+	}
+}
+
+func TestMirrorDisabledNeverCreatesFlowConcurrently(t *testing.T) {
+	m := newMirror(true, t.Logf)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				feedPkt(m, true, mkTCP("10.0.0.2", "1.2.3.4", uint16(40000+i), 443, 1, 0x02, nil))
+			}
+		}(i)
+	}
+	m.SetEnabled(false)
+	wg.Wait()
+	m.SetEnabled(false)
+	m.mu.Lock()
+	n := len(m.flows)
+	m.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("flows after disable = %d", n)
+	}
+	m.Close()
+	feedPkt(m, true, mkTCP("10.0.0.2", "1.2.3.4", 41000, 443, 1, 0x02, nil))
+	if len(m.flows) != 0 {
+		t.Fatal("flow created after Close")
+	}
+}
+
+func TestMirrorEndOfFlowStartsOneGoroutine(t *testing.T) {
+	m := newMirror(true, t.Logf)
+	defer m.Close()
+	mirrorEndSpawns.Store(0)
+	feedPkt(m, true, mkTCP("10.0.0.2", "1.2.3.4", 42000, 443, 1, 0x02, nil))
+	for i := 0; i < 20; i++ {
+		feedPkt(m, true, mkTCP("10.0.0.2", "1.2.3.4", 42000, 443, 2, 0x04, nil))
+	}
+	if n := mirrorEndSpawns.Load(); n != 1 {
+		t.Fatalf("end goroutines = %d, want 1", n)
+	}
+}
+
+func TestMirrorClosedFlowIsReplacedBySyn(t *testing.T) {
+	m := newMirror(true, t.Logf)
+	defer m.Close()
+	feedPkt(m, true, mkTCP("10.0.0.2", "1.2.3.4", 43000, 443, 1, 0x02, nil))
+	m.mu.Lock()
+	old := m.flows[43000]
+	m.mu.Unlock()
+	old.close()
+	feedPkt(m, true, mkTCP("10.0.0.2", "1.2.3.4", 43000, 443, 100, 0x02, nil))
+	m.mu.Lock()
+	cur := m.flows[43000]
+	m.mu.Unlock()
+	if cur == nil || cur == old {
+		t.Fatal("closed flow was not replaced")
+	}
+}

@@ -119,6 +119,7 @@ type mirrorFlow struct {
 	done                  chan struct{}
 	once                  sync.Once
 	fin                   [2]bool
+	ending                bool // end-of-flow goroutine already started (under mu)
 	last                  time.Time
 	addr                  string // "127.0.0.1:x ⇄ 127.0.0.1:y" once connected
 	ready                 atomic.Bool
@@ -207,7 +208,24 @@ func (m *mirror) packet(outbound bool, pkt []byte, p *pktInfo) {
 	}
 
 	m.mu.Lock()
+	select {
+	case <-m.stop:
+		m.mu.Unlock()
+		return
+	default:
+	}
+	if !m.enabled.Load() { // re-check under mu: SetEnabled(false) clears flows under it
+		m.mu.Unlock()
+		return
+	}
 	f := m.flows[local]
+	if f != nil {
+		select {
+		case <-f.done: // closed (failed setup / ended): a new flow may replace it
+			f = nil
+		default:
+		}
+	}
 	if outbound && syn && !ack { // new connection from the game
 		if f != nil {
 			f.close()
@@ -241,9 +259,13 @@ func (m *mirror) packet(outbound bool, pkt []byte, p *pktInfo) {
 	if fin {
 		f.fin[dir] = true
 	}
-	end := rst || (f.fin[0] && f.fin[1])
+	end := (rst || (f.fin[0] && f.fin[1])) && !f.ending
+	if end {
+		f.ending = true
+	}
 	f.mu.Unlock()
 	if end {
+		mirrorEndSpawns.Add(1)
 		go func() {
 			time.Sleep(time.Second) // let the writers flush
 			f.close()
@@ -255,6 +277,9 @@ func (m *mirror) packet(outbound bool, pkt []byte, p *pktInfo) {
 		}()
 	}
 }
+
+// mirrorEndSpawns counts end-of-flow goroutines (tests assert one per flow).
+var mirrorEndSpawns atomic.Int32
 
 func (m *mirror) listener(port uint16) (net.Listener, error) {
 	if ln := m.listeners[port]; ln != nil {
@@ -303,6 +328,11 @@ func (m *mirror) setup(f *mirrorFlow) {
 		m.trace("espelho: fluxo %d->%d FALHOU apos %s (esperou %s na fila): %v",
 			f.localPort, f.serverPort, took.Round(time.Millisecond), waited.Round(time.Millisecond), err)
 		f.close()
+		m.mu.Lock()
+		if m.flows[f.localPort] == f {
+			delete(m.flows, f.localPort)
+		}
+		m.mu.Unlock()
 		return
 	}
 	f.addr = fmt.Sprintf("%s ⇄ %s", cli.LocalAddr(), srv.LocalAddr())
