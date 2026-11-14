@@ -67,3 +67,18 @@ func TestRouteLinesCollapseLongPaths(t *testing.T) {
 		t.Fatalf("middle hop should be collapsed:\n%s", got)
 	}
 }
+
+func TestTunnelCostNeedsBothPingsAndShowsTheDifference(t *testing.T) {
+	ok := func(ms int) PingResult {
+		return PingResult{Target: "x", OK: true, RTT: time.Duration(ms) * time.Millisecond}
+	}
+	if got := tunnelCost(Stats{PingGame: ok(36)}); !strings.Contains(got, "precisa do ping") {
+		t.Fatalf("missing direct ping: %q", got)
+	}
+	if got := tunnelCost(Stats{PingGame: ok(36), PingGameDirect: ok(13)}); !strings.Contains(got, "+23 ms") || !strings.Contains(got, "soma isso") {
+		t.Fatalf("cost: %q", got)
+	}
+	if got := tunnelCost(Stats{PingGame: ok(12), PingGameDirect: ok(13)}); !strings.Contains(got, "-1 ms") || !strings.Contains(got, "não está piorando") {
+		t.Fatalf("tunnel faster: %q", got)
+	}
+}

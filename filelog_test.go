@@ -237,3 +237,16 @@ func TestFormatHealthMirrorFieldsAndNeverHandshake(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatHealthShowsGamePingThroughTunnelAndDirect(t *testing.T) {
+	got := formatHealth(healthSample{HandshakeAgeSec: 5, PingGameMs: 36, PingGameDirectMs: 13}, healthSample{})
+	if !strings.Contains(got, " jogo=36ms direto=13ms custo_tunel=+23ms") {
+		t.Fatalf("both game pings and their difference must be logged: %q", got)
+	}
+	if got := formatHealth(healthSample{HandshakeAgeSec: 5, PingGameDirectMs: 13}, healthSample{}); !strings.Contains(got, "jogo=0ms direto=13ms") || strings.Contains(got, "custo_tunel") {
+		t.Fatalf("no cost without both measurements: %q", got)
+	}
+	if got := formatHealth(healthSample{HandshakeAgeSec: 5}, healthSample{}); strings.Contains(got, "direto=") {
+		t.Fatalf("no game fields before any game ping: %q", got)
+	}
+}

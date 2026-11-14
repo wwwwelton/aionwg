@@ -111,6 +111,7 @@ type Stats struct {
 	PingEndpoint     PingResult // direct ICMP to VPN server (outside the tunnel)
 	PingTunnel       PingResult // ICMP through the tunnel to the gateway
 	PingGame         PingResult // ICMP through the tunnel to the game server
+	PingGameDirect   PingResult // ICMP straight to the game server, outside the tunnel
 	MirrorOn         bool
 	UDPDupOn         bool   // worker enabled; active only in split-tunnel mode
 	UDPOriginals     int    // A of the A:B ratio
@@ -258,9 +259,10 @@ func (s *pingState) record(ok bool, rtt time.Duration) {
 }
 
 const (
-	pingIDGateway = 0xA102
-	pingIDGame    = 0xA103
-	pingIDTrace   = 0xA104
+	pingIDGateway    = 0xA102
+	pingIDGame       = 0xA103
+	pingIDTrace      = 0xA104
+	pingIDGameDirect = 0xA105 // map key only: this probe is a plain Windows ICMP echo
 )
 
 func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*Engine, error) {
@@ -275,9 +277,10 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 		stop:      make(chan struct{}),
 		pending:   map[uint32]time.Time{},
 		pings: map[uint16]*pingState{
-			pingIDGateway: {},
-			pingIDGame:    {},
-			0:             {}, // endpoint (direct)
+			pingIDGateway:    {},
+			pingIDGame:       {},
+			pingIDGameDirect: {},
+			0:                {}, // endpoint (direct)
 		},
 	}
 	var ok4, ok6 bool
@@ -768,6 +771,7 @@ func (e *Engine) healthSample() healthSample {
 		InjectErr: s.Diag.InjectErr, NoNAT: s.Diag.InNoNAT, QueueFull: s.Diag.TunDrop,
 		Flows: s.Flows, MirrorOn: s.MirrorOn, MirrorFlows: len(s.MirrorFlows),
 		PingTunnelMs: int(s.PingTunnel.RTT.Milliseconds()), PingLossPct: int(s.PingTunnel.Loss * 100),
+		PingGameMs: pingMs(s.PingGame), PingGameDirectMs: pingMs(s.PingGameDirect),
 	}
 	if !s.Handshake.IsZero() {
 		h.HandshakeAgeSec = int64(time.Since(s.Handshake).Seconds())
@@ -808,6 +812,11 @@ func (e *Engine) pingLoop() {
 	if icmp != nil {
 		defer icmp.close()
 	}
+	icmpGame, _ := newIcmpPinger() // own handle: the endpoint probe above can wait 1.5 s
+	if icmpGame != nil {
+		defer icmpGame.close()
+	}
+	var gameInFlight atomic.Bool
 	var inFlight atomic.Bool
 	tk := time.NewTicker(time.Second)
 	defer tk.Stop()
@@ -839,6 +848,26 @@ func (e *Engine) pingLoop() {
 			}
 			e.pingMu.Unlock()
 			e.sendTunnelPing(pingIDGame, gs)
+		}
+		// 3) straight to the game server, outside the tunnel: shows what the tunnel costs
+		if gs := e.gameServer(); gs.IsValid() && gs.Is4() && icmpGame != nil {
+			e.pingMu.Lock()
+			if ps := e.pings[pingIDGameDirect]; ps == nil || ps.target != gs {
+				e.pings[pingIDGameDirect] = &pingState{target: gs}
+			}
+			e.pingMu.Unlock()
+			if gameInFlight.CompareAndSwap(false, true) {
+				go func(t netip.Addr) {
+					defer gameInFlight.Store(false)
+					rtt, code := icmpGame.ping(t, 1500*time.Millisecond)
+					e.pingMu.Lock()
+					if ps := e.pings[pingIDGameDirect]; ps != nil && ps.target == t {
+						ps.err = code
+						ps.record(code == 0, rtt)
+					}
+					e.pingMu.Unlock()
+				}(gs)
+			}
 		}
 		// expire unanswered probes
 		e.pingMu.Lock()
@@ -975,6 +1004,9 @@ func (e *Engine) Stats() Stats {
 	s.PingEndpoint = e.pings[0].result()
 	s.PingTunnel = e.pings[pingIDGateway].result()
 	s.PingGame = e.pings[pingIDGame].result()
+	if ps := e.pings[pingIDGameDirect]; ps != nil {
+		s.PingGameDirect = ps.result()
+	}
 	e.pingMu.Unlock()
 
 	if uapi, err := e.dev.IpcGet(); err == nil {
@@ -1668,4 +1700,12 @@ func (e *Engine) traceLoop() {
 		}
 		e.runTrace()
 	}
+}
+
+// pingMs is the last reply in whole milliseconds, 0 when the probe is failing.
+func pingMs(p PingResult) int {
+	if !p.OK {
+		return 0
+	}
+	return max(1, int(p.RTT.Milliseconds()))
 }

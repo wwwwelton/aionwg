@@ -151,19 +151,21 @@ func (l *fileLog) run() {
 // healthSample is what the periodic snapshot records. Plain numbers, so the
 // formatting is portable and testable; the engine fills it from Stats.
 type healthSample struct {
-	HandshakeAgeSec int64 // seconds since the last WireGuard handshake; -1 = never
-	PingTunnelMs    int   // 0 = no reply
-	PingLossPct     int
-	CapturedPkts    uint64 // packets sent into the tunnel
-	InjectedPkts    uint64 // packets returned to the apps
-	InjectErr       uint64
-	NoNAT           uint64 // answers with no matching flow
-	QueueFull       uint64 // tunnel queue overflowed
-	Flows           int
-	MirrorOn        bool
-	MirrorFlows     int    // established mirror connections
-	MeterPackets    uint64 // packets copied into the AionWG-Meter adapter
-	MeterRingFull   uint64 // copies dropped because the meter ring was full
+	HandshakeAgeSec  int64 // seconds since the last WireGuard handshake; -1 = never
+	PingTunnelMs     int   // 0 = no reply
+	PingLossPct      int
+	PingGameMs       int    // through the tunnel to the game server; 0 = no reply
+	PingGameDirectMs int    // straight to the game server, outside the tunnel; 0 = no reply
+	CapturedPkts     uint64 // packets sent into the tunnel
+	InjectedPkts     uint64 // packets returned to the apps
+	InjectErr        uint64
+	NoNAT            uint64 // answers with no matching flow
+	QueueFull        uint64 // tunnel queue overflowed
+	Flows            int
+	MirrorOn         bool
+	MirrorFlows      int    // established mirror connections
+	MeterPackets     uint64 // packets copied into the AionWG-Meter adapter
+	MeterRingFull    uint64 // copies dropped because the meter ring was full
 }
 
 // formatHealth renders cur as one line. Counters are shown with their change
@@ -189,6 +191,12 @@ func formatHealth(cur, prev healthSample) string {
 		hs, cur.PingTunnelMs, cur.PingLossPct, cur.Flows,
 		d(cur.CapturedPkts, prev.CapturedPkts), d(cur.InjectedPkts, prev.InjectedPkts),
 		d(cur.InjectErr, prev.InjectErr), d(cur.NoNAT, prev.NoNAT), d(cur.QueueFull, prev.QueueFull))
+	if cur.PingGameMs > 0 || cur.PingGameDirectMs > 0 {
+		s += fmt.Sprintf(" jogo=%dms direto=%dms", cur.PingGameMs, cur.PingGameDirectMs)
+		if cur.PingGameMs > 0 && cur.PingGameDirectMs > 0 {
+			s += fmt.Sprintf(" custo_tunel=%+dms", cur.PingGameMs-cur.PingGameDirectMs)
+		}
+	}
 	if cur.MirrorOn {
 		s += fmt.Sprintf(" espelho=%d_fluxos meter+%d meter_cheio+%d",
 			cur.MirrorFlows, d(cur.MeterPackets, prev.MeterPackets), d(cur.MeterRingFull, prev.MeterRingFull))

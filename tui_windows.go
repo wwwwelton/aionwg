@@ -934,6 +934,8 @@ func (m model) View() string {
 			row("VPN direto", fmtPing(s.PingEndpoint)+sDim.Render("  "+s.PingEndpoint.Target)),
 			row("Túnel", fmtPing(s.PingTunnel)+sDim.Render("  "+s.PingTunnel.Target)),
 			row(gameLbl, fmtPing(s.PingGame)+sDim.Render("  "+s.PingGame.Target)),
+			row("Jogo (direto)", fmtPing(s.PingGameDirect)+sDim.Render("  "+s.PingGameDirect.Target)),
+			row("Custo do túnel", tunnelCost(s)),
 			sLabel.Render(fmt.Sprintf("%-12s", "Histórico"))+sparkline(m.histPing, inner-14, func(v float64) lipgloss.Color { return pingColor(v) }, true, m.frame),
 			sLabel.Render(fmt.Sprintf("%-12s", ""))+histStats(m.histPing, func(v float64) string { return fmt.Sprintf("%.0f ms", v) }),
 		)
@@ -1294,4 +1296,25 @@ func routeLines(s Stats) []string {
 	out = append(out, sDim.Render("endpoint → "+dest+" ")+rt.Dest.String())
 	out = append(out, segment(rt.Tunnel, rt.Dest, mark, "nenhum salto respondeu dentro do túnel (o provedor pode filtrar ICMP/TTL)")...)
 	return out
+}
+
+// tunnelCost is how many ms the tunnel adds to the game ping compared with going
+// straight to the game server (both measured now).
+func tunnelCost(s Stats) string {
+	t, d := pingMs(s.PingGame), pingMs(s.PingGameDirect)
+	if t == 0 || d == 0 {
+		return sDim.Render("— (precisa do ping do jogo pelo túnel e direto)")
+	}
+	diff := t - d
+	col, note := cGreen, "  (o túnel não está piorando o ping)"
+	switch {
+	case diff > 15:
+		col = cRed
+	case diff > 5:
+		col = cYellow
+	}
+	if diff > 0 {
+		note = "  (o túnel soma isso ao ping do jogo)"
+	}
+	return lipgloss.NewStyle().Foreground(col).Bold(true).Render(fmt.Sprintf("%+d ms", diff)) + sDim.Render(note)
 }
