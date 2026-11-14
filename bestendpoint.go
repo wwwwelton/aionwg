@@ -1,24 +1,32 @@
 package main
 
-// Optional route optimisation: at connect time pick the lowest-latency IPv4
-// endpoint among the profile's own one, every address its host name resolves
-// to (multi-record VPS names) and the user's endpoint_candidates (settings).
-// The engine then confirms a WireGuard handshake and falls back to the
-// profile's endpoint otherwise (ICMP can answer where WireGuard does not).
-// Nothing changes when the current endpoint is already the fastest, does not
-// answer ICMP, or has no alternative. No addresses are built into the program.
+// Optional route optimisation, no addresses built in or configured. At connect
+// time the candidates are derived from the profile's endpoint itself: every
+// IPv4 its host name resolves to, plus (for a public endpoint) the addresses
+// with the same host octet in the other /24 blocks of its /16. One ICMP echo
+// ranks them all, medians confirm the best few, and a throwaway WireGuard
+// handshake (engine side) decides which one is really a WireGuard server, since
+// many neighbours answer ping but are unrelated hosts. Nothing changes when the
+// current endpoint is already the fastest, does not answer ICMP, or nothing
+// better completes a handshake.
 
 import (
 	"net"
 	"net/netip"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 )
 
-// endpointMargin keeps the current endpoint unless another is clearly faster
-// (ICMP has 1 ms resolution on Windows).
-const endpointMargin = 3 * time.Millisecond
+const (
+	endpointMargin = 3 * time.Millisecond // ICMP has 1 ms resolution on Windows
+	sweepKeep      = 8                    // best sweep answers that get a 5-echo median
+	maxTrials      = 2                    // handshakes tried, best first
+	sweepWorkers   = 64
+)
+
+var cgnat = netip.MustParsePrefix("100.64.0.0/10")
 
 func lookupIPv4(host string) ([]netip.Addr, error) {
 	ips, err := net.LookupIP(host)
@@ -33,9 +41,8 @@ func lookupIPv4(host string) ([]netip.Addr, error) {
 	return out, err
 }
 
-// endpointCandidates returns cur first, then the distinct IPv4 alternatives
-// from the endpoint's host name and from extra (IPs or host names).
-func endpointCandidates(cur netip.AddrPort, host string, extra []string, lookup func(string) ([]netip.Addr, error)) []netip.Addr {
+// endpointCandidates returns cur first, then the distinct IPv4 alternatives.
+func endpointCandidates(cur netip.AddrPort, host string, lookup func(string) ([]netip.Addr, error)) []netip.Addr {
 	cands := []netip.Addr{cur.Addr()}
 	seen := map[netip.Addr]bool{cur.Addr(): true}
 	add := func(a netip.Addr) {
@@ -44,50 +51,84 @@ func endpointCandidates(cur netip.AddrPort, host string, extra []string, lookup 
 			cands = append(cands, a)
 		}
 	}
-	for _, h := range append([]string{host}, extra...) {
-		h = strings.TrimSpace(h)
-		if h == "" {
-			continue
-		}
-		if a, err := netip.ParseAddr(h); err == nil {
-			add(a)
-			continue
-		}
-		ips, _ := lookup(h)
+	if _, err := netip.ParseAddr(host); err != nil { // a name, not a literal IP
+		ips, _ := lookup(host)
 		for _, a := range ips {
 			add(a)
+		}
+	}
+	if a := cur.Addr(); a.Is4() && a.IsGlobalUnicast() && !a.IsPrivate() && !cgnat.Contains(a) {
+		b := a.As4()
+		for n := 0; n < 256; n++ {
+			b[2] = byte(n)
+			add(netip.AddrFrom4(b))
 		}
 	}
 	return cands
 }
 
-// bestEndpoint probes cands (cands[0] is the current endpoint) concurrently
-// and returns the endpoint to use with the measured latencies (0 = unknown).
-func bestEndpoint(cur netip.AddrPort, cands []netip.Addr, probe func(netip.Addr) (time.Duration, bool)) (best netip.AddrPort, curRTT, bestRTT time.Duration) {
-	rtts := make([]time.Duration, len(cands))
-	oks := make([]bool, len(cands))
-	var wg sync.WaitGroup
-	for i, a := range cands {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			rtts[i], oks[i] = probe(a)
-		}()
+type rankedEndpoint struct {
+	netip.AddrPort
+	RTT time.Duration
+}
+
+// rankEndpoints measures cands (cands[0] is the current endpoint) and returns
+// the current latency (0 = it does not answer, so nothing is compared) and the
+// alternatives at least endpointMargin faster, best first, at most maxTrials.
+// sweep is one echo; median is the careful measurement. Both must be safe to
+// call concurrently.
+func rankEndpoints(cur netip.AddrPort, cands []netip.Addr, sweep, median func(netip.Addr) (time.Duration, bool)) (curRTT time.Duration, ranked []rankedEndpoint) {
+	type answer struct {
+		addr netip.Addr
+		rtt  time.Duration
+		ok   bool
 	}
-	wg.Wait()
-	if !oks[0] {
-		return cur, 0, 0 // cannot compare against a silent current endpoint
+	run := func(addrs []netip.Addr, probe func(netip.Addr) (time.Duration, bool)) []answer {
+		out := make([]answer, len(addrs))
+		sem := make(chan struct{}, sweepWorkers)
+		var wg sync.WaitGroup
+		for i, a := range addrs {
+			wg.Add(1)
+			sem <- struct{}{}
+			go func() {
+				defer wg.Done()
+				defer func() { <-sem }()
+				r, ok := probe(a)
+				out[i] = answer{a, r, ok}
+			}()
+		}
+		wg.Wait()
+		return out
 	}
-	bi := 0
-	for i := 1; i < len(cands); i++ {
-		if oks[i] && rtts[i] < rtts[bi] {
-			bi = i
+	var alive []answer
+	for _, r := range run(cands[1:], sweep) {
+		if r.ok {
+			alive = append(alive, r)
 		}
 	}
-	if rtts[0]-rtts[bi] < endpointMargin {
-		return cur, rtts[0], rtts[0]
+	sort.Slice(alive, func(i, j int) bool { return alive[i].rtt < alive[j].rtt })
+	if len(alive) > sweepKeep {
+		alive = alive[:sweepKeep]
 	}
-	return netip.AddrPortFrom(cands[bi], cur.Port()), rtts[0], rtts[bi]
+	probe := []netip.Addr{cur.Addr()}
+	for _, r := range alive {
+		probe = append(probe, r.addr)
+	}
+	meds := run(probe, median)
+	if !meds[0].ok {
+		return 0, nil
+	}
+	curRTT = meds[0].rtt
+	for _, m := range meds[1:] {
+		if m.ok && curRTT-m.rtt >= endpointMargin {
+			ranked = append(ranked, rankedEndpoint{netip.AddrPortFrom(m.addr, cur.Port()), m.rtt})
+		}
+	}
+	sort.Slice(ranked, func(i, j int) bool { return ranked[i].RTT < ranked[j].RTT })
+	if len(ranked) > maxTrials {
+		ranked = ranked[:maxTrials]
+	}
+	return curRTT, ranked
 }
 
 // handshakenPeers returns the hex public keys that have a handshake time in a

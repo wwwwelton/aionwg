@@ -183,7 +183,7 @@ func connectCmd(name string, s Settings) tea.Cmd {
 			UDPDuplicate: s.UDPDuplicate, UDPOriginals: s.UDPOriginals, UDPCopies: s.UDPCopies, UDPForce: s.UDPForce,
 			UDPNewestOut: s.UDPNewestOut, UDPNewestIn: s.UDPNewestIn,
 			FullTunnel: s.FullTunnel, NoDNS: s.NoDNS,
-			WFP: s.WFP, WFPApps: s.WFPApps, BestEndpoint: s.BestEndpoint, EndpointCandidates: s.EndpointCandidates,
+			WFP: s.WFP, WFPApps: s.WFPApps, BestEndpoint: s.BestEndpoint,
 			ConfigPath:  filepath.Join(configDir(), name),
 			ConfigPaths: mirrorPaths,
 		}, func(f string, a ...any) {
@@ -365,7 +365,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.settings.BestEndpoint = !m.settings.BestEndpoint
 			_ = saveSettings(m.settings)
 			if m.settings.BestEndpoint {
-				m.log("Melhor endpoint LIGADO — vale na próxima conexão (testa IPs alternativos por ICMP)")
+				m.log("Melhor endpoint LIGADO — vale na próxima conexão (descobre e mede endpoints por ICMP, confirma por handshake)")
 			} else {
 				m.log("Melhor endpoint DESLIGADO — vale na próxima conexão (usa o endpoint da config)")
 			}
