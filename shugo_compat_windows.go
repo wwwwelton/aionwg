@@ -282,7 +282,9 @@ func (c *shugoCompat) run(logf func(string, ...any)) (resultErr error) {
 			}
 			if !strings.EqualFold(windows.UTF16ToString(module.ExePath[:]), path) {
 				windows.CloseHandle(t.process)
-				return fmt.Errorf("o Shugo tem outra DLL de compatibilidade carregada; reinicie o Shugo")
+				logf("Shugo PID %d: outra DLL de compatibilidade carregada; reinicie o Shugo", pid)
+				failed[pid] = true
+				continue
 			}
 			t.base, t.stop, t.status = module.ModBaseAddr, offsets["AionWGCompatStop"], offsets["AionWGCompatStatus"]
 			code, started, err := shugoRemoteCall(t.process, t.base+offsets["AionWGCompatStart"], 0)
