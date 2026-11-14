@@ -29,9 +29,12 @@ type wfpMonitor struct {
 	wg     sync.WaitGroup
 	procMu sync.Mutex
 
-	fbMu    sync.Mutex
+	fbMu    sync.Mutex        // guards only the cache below, never held during a dump
 	fbPorts map[portKey]uint8 // ports of selected apps, from the system table
 	fbAt    time.Time
+	fbGen   uint64                                   // bumped by invalidateFallback; a dump begun earlier is not published
+	dumpMu  sync.Mutex                               // single-flight: one dump at a time
+	dump    func(map[uint32]uint8) map[portKey]uint8 // nil = system table; tests inject
 }
 
 // startWFPMonitor always returns a working monitor: the process tree refresh and
@@ -61,13 +64,36 @@ func startWFPMonitor(table *wfpTable, logf func(string, ...any)) *wfpMonitor {
 // layer never saw (opened before its handle). One dump answers every port for
 // wfpFallbackTTL, so a burst of packets does not dump the table per packet.
 func (m *wfpMonitor) systemClass(proto uint8, port uint16) uint8 {
+	k := portKey{proto, port}
+	if ports, ok := m.fallbackCache(); ok {
+		return ports[k]
+	}
+	m.dumpMu.Lock()
+	defer m.dumpMu.Unlock()
+	if ports, ok := m.fallbackCache(); ok { // the dump we waited for already published
+		return ports[k]
+	}
+	m.fbMu.Lock()
+	gen := m.fbGen
+	m.fbMu.Unlock()
+	var ports map[portKey]uint8
+	if m.dump != nil {
+		ports = m.dump(m.table.SelectedPIDs())
+	} else {
+		ports, _ = dumpOwnedPorts(m.table.SelectedPIDs())
+	}
+	m.fbMu.Lock()
+	if gen == m.fbGen { // selection changed meanwhile: answer this caller, cache nothing stale
+		m.fbPorts, m.fbAt = ports, time.Now()
+	}
+	m.fbMu.Unlock()
+	return ports[k] // zero value is classNone
+}
+
+func (m *wfpMonitor) fallbackCache() (map[portKey]uint8, bool) {
 	m.fbMu.Lock()
 	defer m.fbMu.Unlock()
-	if m.fbPorts == nil || time.Since(m.fbAt) > wfpFallbackTTL {
-		m.fbPorts, _ = dumpOwnedPorts(m.table.SelectedPIDs())
-		m.fbAt = time.Now()
-	}
-	return m.fbPorts[portKey{proto, port}] // zero value is classNone
+	return m.fbPorts, m.fbPorts != nil && time.Since(m.fbAt) <= wfpFallbackTTL
 }
 
 // invalidateFallback drops the cached system-table answer, so a changed app
@@ -75,6 +101,7 @@ func (m *wfpMonitor) systemClass(proto uint8, port uint16) uint8 {
 func (m *wfpMonitor) invalidateFallback() {
 	m.fbMu.Lock()
 	m.fbPorts = nil
+	m.fbGen++
 	m.fbMu.Unlock()
 }
 
