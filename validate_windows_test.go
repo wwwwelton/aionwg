@@ -164,8 +164,8 @@ func TestICMPForcedLossAndRecovery(t *testing.T) {
 	}
 	t.Logf("Simulated edge firewall drop to %s: code=%d (timeout/unreachable as expected)", blackhole, code)
 
-	// 2. Immediate recovery test: ping reachable endpoint right after a timeout
-	peerIP := netip.MustParseAddr("56.124.121.11")
+	// 2. Immediate recovery test: loopback is reachable without internet, so runner network can't flake it
+	peerIP := netip.MustParseAddr("127.0.0.1")
 	rtt2, code2 := pinger.ping(peerIP, 2*time.Second)
 	if code2 != 0 {
 		t.Fatalf("pinger failed to recover after timeout, got code %d for %s", code2, peerIP)
