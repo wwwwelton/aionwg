@@ -199,6 +199,9 @@ type Engine struct {
 
 	natMu sync.Mutex
 	nat   map[portKey]*natEntry
+	// gameDst: servers the game (classGame) has used. Other WFP apps tunnel only
+	// to these; the rest of their TCP/UDP leaves on the normal route.
+	gameDst map[netip.Addr]bool
 
 	up, down                                   atomic.Uint64
 	gameUp, gameDown                           atomic.Uint64
@@ -298,6 +301,7 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 		traceGot:  map[uint16]traceAnswer{},
 		routeMon:  opt.BestEndpoint,
 		nat:       map[portKey]*natEntry{},
+		gameDst:   map[netip.Addr]bool{},
 		stop:      make(chan struct{}),
 		pending:   map[uint32]time.Time{},
 		pings: map[uint16]*pingState{
@@ -577,6 +581,11 @@ func (e *Engine) capture(pkt []byte, addr *divertAddress) bool {
 		return false
 	}
 	isGame := class == classGame
+	if isGame {
+		e.markGameDst(p.dst)
+	} else if class == classApp && e.wfpOn.Load() && e.wfp != nil && !e.isGameDst(p.dst) {
+		return false // other WFP app, not a game server: normal route
+	}
 	dst := p.dst
 	var dnsOrig netip.Addr
 	if full && p.dstPort == 53 && !e.noDNS.Load() {
@@ -1303,6 +1312,21 @@ func (e *Engine) ObservedRemotes() []netip.Addr {
 		}
 	}
 	return out
+}
+
+// markGameDst records a server the game talks to.
+func (e *Engine) markGameDst(dst netip.Addr) {
+	e.natMu.Lock()
+	e.gameDst[dst] = true
+	e.natMu.Unlock()
+}
+
+// isGameDst reports whether the game has talked to dst; other WFP apps tunnel
+// only to those servers.
+func (e *Engine) isGameDst(dst netip.Addr) bool {
+	e.natMu.Lock()
+	defer e.natMu.Unlock()
+	return e.gameDst[dst]
 }
 
 // Endpoints returns the resolved VPN endpoints.
