@@ -143,6 +143,7 @@ type Stats struct {
 	Route            RouteTrace // latest traceroute of the route in use
 	RouteMonitor     bool       // best-endpoint option active for this connection
 	RouteNote        string     // last route monitor / endpoint switch message
+	Exit             ExitInfo   // where the tunnel exits (zero until measured)
 }
 
 type outboundUDPJob struct {
@@ -208,6 +209,10 @@ type Engine struct {
 	learned   map[netip.AddrPort]bool // endpoints proven by a handshake (route monitor)
 	routeMon  bool
 	routeNote atomic.Pointer[string]
+	exit      atomic.Pointer[ExitInfo]
+	geoMu     sync.Mutex
+	geoWait   map[uint16]chan string // DNS id -> waiting exit query
+	geoSeq    uint16
 	trace     atomic.Pointer[RouteTrace]
 	traceKick chan struct{}
 	traceMu   sync.Mutex
@@ -408,6 +413,8 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 		e.wg.Add(1)
 		go func() { defer e.wg.Done(); loop() }()
 	}
+	e.wg.Add(1)
+	go func() { defer e.wg.Done(); e.scanLoop(opt.BestEndpoint) }()
 	if opt.BestEndpoint {
 		e.wg.Add(1)
 		go func() { defer e.wg.Done(); e.routeLoop() }()
@@ -444,7 +451,7 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 	}
 	logf("túnel ativo · endpoint %s · filtro WinDivert aberto", e.endpoints[0])
 	if opt.BestEndpoint {
-		logf("rota: [3/3] busca dinâmica ativa: reavalia os endpoints conhecidos a cada %v e procura novos quando o jogo está parado", routeEvery)
+		logf("rota: [3/3] busca dinâmica ativa: reavalia os endpoints conhecidos a cada %v; procura novos a cada %v quando o jogo está parado", routeEvery, discoverEvery)
 	}
 	return e, nil
 }
@@ -682,6 +689,10 @@ func (e *Engine) processInbound(pkt []byte) {
 			return
 		}
 		e.relayICMPError(pkt, &p)
+		return
+	}
+	if p.proto == protoUDP && p.dstPort == geoPort {
+		e.geoReply(pkt, &p)
 		return
 	}
 	e.natMu.Lock()
@@ -960,6 +971,9 @@ func (e *Engine) Stats() Stats {
 	s.RouteMonitor = e.routeMon
 	if n := e.routeNote.Load(); n != nil {
 		s.RouteNote = *n
+	}
+	if x := e.exit.Load(); x != nil {
+		s.Exit = *x
 	}
 	var addrs []string
 	for _, a := range e.conf.Addresses {
@@ -1556,7 +1570,6 @@ func (e *Engine) routeLoop() {
 	tk := time.NewTicker(routeEvery)
 	defer tk.Stop()
 	var next time.Time
-	lastDiscover := time.Now() // the connect step already searched
 	for {
 		select {
 		case <-e.stop:
@@ -1567,12 +1580,8 @@ func (e *Engine) routeLoop() {
 		if e.closing.Load() {
 			continue
 		}
-		if !gs.IsValid() { // no game traffic: the safe moment to look for new endpoints
-			if time.Since(lastDiscover) >= discoverEvery {
-				lastDiscover = time.Now()
-				e.discoverIdle()
-			}
-			continue
+		if !gs.IsValid() {
+			continue // no game traffic: nothing to compare (new endpoints: scanLoop)
 		}
 		if time.Now().Before(next) {
 			continue
@@ -1822,7 +1831,17 @@ func (e *Engine) discoverIdle() {
 	for _, l := range e.learnedList() {
 		skip[l.Addr()] = true
 	}
-	cands := dropAddrs(endpointCandidates(cur, host, lookupIPv4), skip)
+	known := endpointCandidates(cur, host, lookupIPv4)
+	seen := map[netip.Addr]bool{}
+	for _, a := range known {
+		seen[a] = true
+	}
+	for _, a := range warpSeeds(cur.Addr()) {
+		if !seen[a] {
+			known = append(known, a)
+		}
+	}
+	cands := dropAddrs(known, skip)
 	if len(cands) < 2 {
 		return
 	}

@@ -32,7 +32,7 @@ var (
 	routeSettle   = 12 * time.Second // game pings collected through the new path
 	routeCooldown = 3 * time.Minute  // after a kept switch
 	failCooldown  = 10 * time.Minute // after a failed or reverted one
-	discoverEvery = 10 * time.Minute // new endpoints are searched at most this often, only while the game is idle
+	discoverEvery = 10 * time.Second // new endpoints are searched this often, only while the game is idle; each candidate is handshake-probed once
 )
 
 // pickRoute returns the endpoint whose direct leg beats curLeg by routeMargin,

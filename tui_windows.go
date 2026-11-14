@@ -906,6 +906,7 @@ func (m model) render(level int) string {
 		stat = append(stat,
 			row("Config", sBold.Render(m.engName)+sDim.Render("  · ativo há "+time.Since(m.since).Round(time.Second).String())),
 			row("Endpoint", s.Endpoint+sDim.Render("   túnel ")+s.TunnelAddr+sDim.Render("   [v] troca")),
+			row("Saída", exitStatus(s.Exit)),
 			row("Handshake", hs),
 			row(procLabel, procs),
 		)
@@ -1412,4 +1413,12 @@ func routeSummary(s Stats) []string {
 		sBold.Render("PC → endpoint ") + rt.Endpoint.String() + sDim.Render("  "+seg(rt.Direct, rt.Endpoint)),
 		sBold.Render("túnel → ") + rt.Dest.String() + sDim.Render("  "+seg(rt.Tunnel, rt.Dest)),
 	}
+}
+
+// exitStatus shows where the tunnel exits (data centre, city and IP).
+func exitStatus(x ExitInfo) string {
+	if x.At.IsZero() {
+		return sDim.Render("medindo…")
+	}
+	return sBold.Render(x.String())
 }
