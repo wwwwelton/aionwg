@@ -85,6 +85,7 @@ type EngineOptions struct {
 	ConfigPath       string   // imported profile receiving learned WFP destinations
 	ConfigPaths      []string
 	BestEndpoint     bool // monitor and try faster endpoints while connected
+	CWBSearch        bool // pick the lowest-ping Curitiba endpoint, measured with a dummy target when no game runs
 }
 
 // Diag are counters for the diagnostics panel.
@@ -228,6 +229,7 @@ type Engine struct {
 	lrMu      sync.Mutex
 	learned   map[netip.AddrPort]bool // endpoints proven by a handshake (route monitor)
 	routeMon  bool
+	cwbOn     bool // dummy-target pings feed the Curitiba search
 	routeNote atomic.Pointer[string]
 	exit      atomic.Pointer[ExitInfo]
 	geoMu     sync.Mutex
@@ -291,6 +293,7 @@ const (
 	pingIDGame       = 0xA103
 	pingIDTrace      = 0xA104
 	pingIDGameDirect = 0xA105 // map key only: this probe is a plain Windows ICMP echo
+	pingIDDummy      = 0xA106 // map key only: idle-time target (cwbDummyTarget) when no game server is known
 )
 
 func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*Engine, error) {
@@ -301,6 +304,7 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 		traceSent: map[uint16]time.Time{},
 		traceGot:  map[uint16]traceAnswer{},
 		routeMon:  opt.BestEndpoint,
+		cwbOn:     opt.CWBSearch,
 		nat:       map[portKey]*natEntry{},
 		gameDst:   map[netip.Addr]bool{},
 		stop:      make(chan struct{}),
@@ -309,6 +313,7 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 			pingIDGateway:    {},
 			pingIDGame:       {},
 			pingIDGameDirect: {},
+			pingIDDummy:      {},
 			0:                {}, // endpoint (direct)
 		},
 	}
@@ -433,6 +438,10 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 	if opt.BestEndpoint {
 		e.wg.Add(1)
 		go func() { defer e.wg.Done(); e.routeLoop() }()
+	}
+	if opt.CWBSearch {
+		e.wg.Add(1)
+		go func() { defer e.wg.Done(); e.cwbLoop() }()
 	}
 	if e.paths[0] != nil {
 		e.wg.Add(1)
@@ -938,6 +947,14 @@ func (e *Engine) pingLoop() {
 			}
 			e.pingMu.Unlock()
 			e.sendTunnelPing(pingIDGame, gs)
+		}
+		if e.cwbOn {
+			e.pingMu.Lock()
+			if e.pings[pingIDDummy].target != cwbDummyTarget {
+				e.pings[pingIDDummy] = &pingState{target: cwbDummyTarget}
+			}
+			e.pingMu.Unlock()
+			e.sendTunnelPing(pingIDDummy, cwbDummyTarget)
 		}
 		// 3) straight to the game server, outside the tunnel: shows what the tunnel costs
 		if gs := e.gameServer(); gs.IsValid() && gs.Is4() && icmpGame != nil {

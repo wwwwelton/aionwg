@@ -69,6 +69,7 @@ const (
 	modeDelete
 	modeWFPApps
 	modeEndpoint
+	modeEndpointPick
 )
 
 type (
@@ -114,6 +115,7 @@ type model struct {
 
 	running   []string // executables seen by the last scan, while the WFP picker is open
 	appCursor int
+	epCursor  int // cursor of the endpoint picker
 
 	showDiag bool
 	prevDiag Diag
@@ -185,7 +187,7 @@ func connectCmd(name string, s Settings) tea.Cmd {
 			UDPDuplicate: s.UDPDuplicate, UDPOriginals: s.UDPOriginals, UDPCopies: s.UDPCopies, UDPForce: s.UDPForce,
 			UDPNewestOut: s.UDPNewestOut, UDPNewestIn: s.UDPNewestIn,
 			FullTunnel: s.FullTunnel, NoDNS: s.NoDNS,
-			WFP: s.WFP, WFPApps: s.WFPApps, BestEndpoint: s.BestEndpoint,
+			WFP: s.WFP, WFPApps: s.WFPApps, BestEndpoint: s.BestEndpoint, CWBSearch: s.CWBSearch,
 			ConfigPath:  filepath.Join(configDir(), name),
 			ConfigPaths: mirrorPaths,
 		}, func(f string, a ...any) {
@@ -343,10 +345,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.log("Conecte primeiro: [v] troca o endpoint do túnel em andamento")
 				return m, nil
 			}
-			m.mode = modeEndpoint
-			m.input.SetValue("")
-			m.input.Placeholder = "IP ou IP:porta (só nesta sessão; o .conf não muda)"
-			m.input.Focus()
+			m.mode = modeEndpointPick
+			m.epCursor = m.endpointPickStart()
 		case "s":
 			m.settings.FullTunnel = !m.settings.FullTunnel
 			_ = saveSettings(m.settings)
@@ -509,6 +509,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.mode == modeWFPApps {
 		return m.updatePicker(msg)
+	}
+	if m.mode == modeEndpointPick {
+		return m.updateEndpointPick(msg)
 	}
 	if m.mode == modeDelete {
 		if msg.String() == "y" || msg.String() == "s" {
@@ -1154,6 +1157,8 @@ func (m model) render(level int) string {
 			fmt.Sprintf("Remover %s? [s/y] sim  [qualquer tecla] não", m.configs[m.cursor]))
 	case modeWFPApps:
 		foot = m.wfpPicker(w)
+	case modeEndpointPick:
+		foot = m.endpointPicker(w)
 	default:
 		k := func(key, desc string) string { return sKey.Render("["+key+"]") + " " + sDim.Render(desc) }
 		act := "conectar"

@@ -105,6 +105,9 @@ func (e *Engine) refreshExit() {
 		return
 	}
 	x := &ExitInfo{IP: ip, Colo: colo, Endpoint: ep, At: time.Now()}
+	if okColo {
+		noteEndpointLoc(ep, colo)
+	}
 	if okIP {
 		if city, cc, err := geoIPLookup(newTestClient(), ip); err == nil {
 			x.City, x.Country = city, cc
