@@ -25,11 +25,17 @@ Teclas
   [w]      liga/desliga o modo WFP (só os apps marcados passam pelo túnel)
   [l]      lista de programas abertos para marcar no modo WFP
   [n]      liga/desliga o DNS pelo túnel (modo sistema inteiro)
-  [b]      liga/desliga "melhor endpoint": ao conectar, descobre alternativas a partir
-           do próprio endpoint (IPs do nome e vizinhos do mesmo bloco), mede por
-           ICMP, confirma por handshake e usa a de menor latência. Se nada melhor
-           provar funcionar, mantém o da config. Faz ~250 pings no início da conexão.
-           Vale na próxima conexão. Nenhum IP vem embutido nem é configurado.
+  [b]      liga/desliga "melhor endpoint" (vale na próxima conexão). Ao conectar,
+           descobre alternativas a partir do próprio endpoint (IPs do nome e
+           vizinhos do mesmo bloco), mede por ICMP e confirma por handshake. Depois,
+           enquanto o jogo tem tráfego, mede a cada 30 s os endpoints já provados
+           (os do perfil, os escolhidos e os aprendidos em %APPDATA%\AionWG\routes.json)
+           e, se um for ao menos 5 ms mais rápido, troca para ele e compara o ping
+           REAL do jogo antes e depois: só mantém se melhorar ao menos 2 ms; senão
+           volta. No máximo uma tentativa a cada 3 min (10 min após falha). Nenhum IP
+           vem embutido e o .conf nunca é alterado. Faz ~250 pings ao conectar.
+  [v]      troca o endpoint do túnel em andamento (IP ou IP:porta). Só vale nesta
+           sessão: o .conf não é alterado. Confirma o handshake; se falhar, desfaz.
   [m]      liga/desliga o espelho para DPS meter
   [x]      autoteste: DNS, IP de saída, Steam, download e upload pelo túnel
   [g]      painel de diagnóstico (contadores)

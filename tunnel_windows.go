@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -145,7 +146,9 @@ type outboundUDPJob struct {
 
 type Engine struct {
 	conf         *WGConf
-	endpoints    []netip.AddrPort
+	endpoints    []netip.AddrPort // as resolved at start; use eps() after that
+	epCur        atomic.Pointer[[]netip.AddrPort]
+	epMu         sync.Mutex // serialises runtime endpoint switches
 	dev          *device.Device
 	tun          *splitTun
 	h            divertHandle
@@ -193,6 +196,9 @@ type Engine struct {
 	pending  map[uint32]time.Time // id<<16|seq -> sent
 	pings    map[uint16]*pingState
 	gwTarget netip.Addr
+	profile  string // profile file name: key of the persisted routes
+	lrMu     sync.Mutex
+	learned  map[netip.AddrPort]bool // endpoints proven by a handshake (route monitor)
 }
 
 type pingState struct {
@@ -202,6 +208,7 @@ type pingState struct {
 	seen    bool // a reply arrived once; earlier timeouts are startup noise, not loss
 	err     uint32
 	history []bool
+	rtts    []time.Duration // recent replies, newest last
 }
 
 func (s *pingState) result() PingResult {
@@ -226,6 +233,10 @@ func (s *pingState) record(ok bool, rtt time.Duration) {
 	if ok {
 		s.last = rtt
 		s.seen = true
+		s.rtts = append(s.rtts, rtt)
+		if len(s.rtts) > 10 {
+			s.rtts = s.rtts[1:]
+		}
 	} else if !s.seen {
 		return
 	}
@@ -267,11 +278,26 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 		if err != nil {
 			return nil, err
 		}
+		profileEP := ep
 		if opt.BestEndpoint && ep.Addr().Is4() {
 			ep = chooseEndpoint(conf, p, ep, logf)
 		}
+		if len(e.endpoints) == 0 {
+			e.profile = filepath.Base(opt.ConfigPath)
+			e.learned = map[netip.AddrPort]bool{profileEP: true, ep: true}
+			if opt.BestEndpoint {
+				for _, r := range loadRoutes(routesPath(), e.profile) {
+					e.learned[r] = true
+				}
+				if ep != profileEP {
+					_ = saveRoute(routesPath(), e.profile, ep)
+				}
+			}
+		}
 		e.endpoints = append(e.endpoints, ep)
 	}
+	startEPs := append([]netip.AddrPort(nil), e.endpoints...)
+	e.epCur.Store(&startEPs)
 	e.pings[0].target = e.endpoints[0].Addr()
 	e.gwTarget = e.pickGateway(opt.PingTarget)
 	e.pings[pingIDGateway].target = e.gwTarget
@@ -349,6 +375,9 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 	}
 	go e.housekeeping()
 	go e.pingLoop()
+	if opt.BestEndpoint {
+		go e.routeLoop()
+	}
 	e.wg.Add(3)
 	go e.runUDPDuplicateWorker()
 	go func() {
@@ -457,7 +486,7 @@ func (e *Engine) capture(pkt []byte, addr *divertAddress) bool {
 		if uint32(p.srcPort) == e.ownUDP.Load() {
 			return false
 		}
-		for _, ep := range e.endpoints {
+		for _, ep := range e.eps() {
 			if p.dstPort == ep.Port() && p.dst == ep.Addr() {
 				return false
 			}
@@ -768,7 +797,7 @@ func (e *Engine) pingLoop() {
 		case <-tk.C:
 		}
 		// 1) direct to the VPN server (outside the tunnel)
-		if icmp != nil && e.endpoints[0].Addr().Is4() {
+		if icmp != nil && e.eps()[0].Addr().Is4() {
 			if inFlight.CompareAndSwap(false, true) {
 				go func(t netip.Addr) {
 					defer inFlight.Store(false)
@@ -777,7 +806,7 @@ func (e *Engine) pingLoop() {
 					e.pings[0].err = code
 					e.pings[0].record(code == 0, rtt)
 					e.pingMu.Unlock()
-				}(e.endpoints[0].Addr())
+				}(e.eps()[0].Addr())
 			}
 		}
 		// 2) through the tunnel
@@ -842,7 +871,7 @@ func (e *Engine) Stats() Stats {
 		GameDown:   e.gameDown.Load(),
 		FullTunnel: e.full.Load(),
 		Procs:      e.owner.Processes(),
-		Endpoint:   e.endpoints[0].String(),
+		Endpoint:   e.eps()[0].String(),
 	}
 	var addrs []string
 	for _, a := range e.conf.Addresses {
@@ -1096,10 +1125,73 @@ func (e *Engine) ObservedRemotes() []netip.Addr {
 // Endpoints returns the resolved VPN endpoints.
 func (e *Engine) EndpointAddrs() []netip.Addr {
 	var out []netip.Addr
-	for _, ep := range e.endpoints {
+	for _, ep := range e.eps() {
 		out = append(out, ep.Addr())
 	}
 	return out
+}
+
+// eps is the endpoint list currently in use (it can change at runtime).
+func (e *Engine) eps() []netip.AddrPort { return *e.epCur.Load() }
+
+// endpointSwitchWait bounds how long a runtime switch waits for the handshake.
+var endpointSwitchWait = 6 * time.Second
+
+// SetEndpointString switches the first peer's endpoint while the tunnel runs.
+// v is "ip" or "ip:port"; the port defaults to the current one.
+func (e *Engine) SetEndpointString(v string) error {
+	v = strings.TrimSpace(v)
+	ep, err := netip.ParseAddrPort(v)
+	if err != nil {
+		a, aerr := netip.ParseAddr(v)
+		if aerr != nil {
+			return fmt.Errorf("endpoint inválido %q (use IP ou IP:porta)", v)
+		}
+		ep = netip.AddrPortFrom(a, e.eps()[0].Port())
+	}
+	return e.SetEndpoint(ep)
+}
+
+// SetEndpoint switches the first peer's endpoint in memory: the profile file
+// is never written and the next connection uses the profile again. A switch
+// that does not complete a handshake is undone.
+func (e *Engine) SetEndpoint(ep netip.AddrPort) error {
+	e.epMu.Lock()
+	defer e.epMu.Unlock()
+	prev := e.eps()
+	if prev[0] == ep {
+		return nil
+	}
+	apply := func(to netip.AddrPort) error {
+		next := append([]netip.AddrPort{to}, prev[1:]...)
+		if err := e.dev.IpcSet(e.conf.UAPI(next)); err != nil {
+			return err
+		}
+		e.epCur.Store(&next)
+		e.pingMu.Lock()
+		e.pings[0] = &pingState{target: to.Addr()}
+		e.pingMu.Unlock()
+		return nil
+	}
+	if err := apply(ep); err != nil {
+		return err
+	}
+	key := hex.EncodeToString(e.conf.Peers[0].PublicKey)
+	ok := false
+	for end := time.Now().Add(endpointSwitchWait); !ok && time.Now().Before(end); time.Sleep(100 * time.Millisecond) {
+		ipc, _ := e.dev.IpcGet()
+		ok = handshakenPeers(ipc)[key]
+	}
+	if ok {
+		e.logf("rota: endpoint trocado %s -> %s (handshake ok; o perfil não foi alterado)", prev[0], ep)
+		e.learn(ep)
+		return nil
+	}
+	if err := apply(prev[0]); err != nil {
+		return fmt.Errorf("sem handshake em %s e não foi possível voltar para %s: %w", ep, prev[0], err)
+	}
+	e.logf("rota: %s não completou o handshake em %v; voltou para %s", ep, endpointSwitchWait, prev[0])
+	return fmt.Errorf("sem handshake em %s", ep)
 }
 
 func (e *Engine) Close() {
@@ -1197,6 +1289,9 @@ func (p *icmpPinger) ping(dst netip.Addr, timeout time.Duration) (time.Duration,
 	return d, 0
 }
 
+// legProbe measures the direct leg to an endpoint; tests replace it.
+var legProbe = icmpMedian
+
 // icmpMedian is the median of 5 echo replies; it fails with fewer than 3.
 func icmpMedian(a netip.Addr) (time.Duration, bool) {
 	p, err := newIcmpPinger()
@@ -1271,4 +1366,103 @@ func chooseEndpoint(conf *WGConf, p PeerConf, ep netip.AddrPort, logf func(strin
 		logf("rota: nenhuma alternativa completou o handshake; mantido %s", ep.Addr())
 	}
 	return ep
+}
+
+// learn remembers an endpoint proven by a handshake, for this session and (per
+// profile, outside the .conf) for the next ones.
+func (e *Engine) learn(ep netip.AddrPort) {
+	e.lrMu.Lock()
+	if e.learned == nil {
+		e.learned = map[netip.AddrPort]bool{}
+	}
+	known := e.learned[ep]
+	e.learned[ep] = true
+	e.lrMu.Unlock()
+	if !known && e.profile != "" {
+		if err := saveRoute(routesPath(), e.profile, ep); err != nil {
+			e.logf("rota: não foi possível gravar o endpoint aprendido: %v", err)
+		}
+	}
+}
+
+func (e *Engine) learnedList() []netip.AddrPort {
+	e.lrMu.Lock()
+	defer e.lrMu.Unlock()
+	out := make([]netip.AddrPort, 0, len(e.learned))
+	for ep := range e.learned {
+		out = append(out, ep)
+	}
+	return out
+}
+
+// gamePing is the median reply time through the tunnel to the game server
+// (0 = not enough samples).
+func (e *Engine) gamePing() time.Duration {
+	e.pingMu.Lock()
+	defer e.pingMu.Unlock()
+	if ps := e.pings[pingIDGame]; ps != nil {
+		return medianRTT(ps.rtts)
+	}
+	return 0
+}
+
+// routeLoop is the live route monitor (see routemon.go): it only acts while the
+// game has traffic, spaces attempts out, and keeps a switch only if the game
+// ping measured through the new path is better.
+func (e *Engine) routeLoop() {
+	tk := time.NewTicker(routeEvery)
+	defer tk.Stop()
+	var next time.Time
+	for {
+		select {
+		case <-e.stop:
+			return
+		case <-tk.C:
+		}
+		gs := e.gameServer()
+		if e.closing.Load() || !gs.IsValid() || time.Now().Before(next) {
+			continue
+		}
+		cur := e.eps()[0]
+		curLeg, ok := legProbe(cur.Addr())
+		if !ok {
+			continue
+		}
+		legs := map[netip.AddrPort]time.Duration{}
+		for _, a := range e.learnedList() {
+			if a == cur {
+				continue
+			}
+			if leg, ok := legProbe(a.Addr()); ok {
+				legs[a] = leg
+			}
+		}
+		alt, found := pickRoute(curLeg, legs)
+		if !found {
+			continue
+		}
+		before := e.gamePing()
+		e.logf("rota: testando %s (perna direta %v contra %v; ping do jogo atual %v)", alt, legs[alt], curLeg, before)
+		if err := e.SetEndpoint(alt); err != nil {
+			next = time.Now().Add(failCooldown)
+			continue
+		}
+		e.pingMu.Lock()
+		e.pings[pingIDGame] = &pingState{target: gs}
+		e.pingMu.Unlock()
+		select {
+		case <-e.stop:
+			return
+		case <-time.After(routeSettle):
+		}
+		after := e.gamePing()
+		if keepRoute(before, after) {
+			e.logf("rota: mantida %s — ping do jogo %v -> %v", alt, before, after)
+			next = time.Now().Add(routeCooldown)
+			continue
+		}
+		e.logf("rota: ping do jogo não melhorou (%v -> %v); voltando para %s", before, after, cur)
+		_ = e.SetEndpoint(cur)
+		next = time.Now().Add(failCooldown)
+	}
 }

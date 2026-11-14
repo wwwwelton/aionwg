@@ -68,6 +68,7 @@ const (
 	modeUDPCopies
 	modeDelete
 	modeWFPApps
+	modeEndpoint
 )
 
 type (
@@ -336,6 +337,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.input.SetValue(m.settings.PingTarget)
 			m.input.Placeholder = "vazio = automático (gateway do túnel)"
 			m.input.Focus()
+		case "v":
+			if m.eng == nil {
+				m.log("Conecte primeiro: [v] troca o endpoint do túnel em andamento")
+				return m, nil
+			}
+			m.mode = modeEndpoint
+			m.input.SetValue("")
+			m.input.Placeholder = "IP ou IP:porta (só nesta sessão; o .conf não muda)"
+			m.input.Focus()
 		case "s":
 			m.settings.FullTunnel = !m.settings.FullTunnel
 			_ = saveSettings(m.settings)
@@ -564,6 +574,22 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.eng.SetUDPRatio(a, b)
 			}
 			m.log("UDP %s: a cada %d originais, %d copia(s) direta(s)", udpRatioLabel(a, b), a, b)
+		case modeEndpoint:
+			eng := m.eng
+			m.mode = modeNormal
+			m.input.Blur()
+			if eng == nil {
+				return m, nil
+			}
+			m.log("Trocando endpoint para %s…", v)
+			return m, func() tea.Msg {
+				if err := eng.SetEndpointString(v); err != nil {
+					line := fmt.Sprintf("ERRO rota: %v", err)
+					diskLog.Printf("%s", line)
+					queueProgramLog(logMsg(line))
+				}
+				return nil
+			}
 		case modePing:
 			m.settings.PingTarget = v
 			_ = saveSettings(m.settings)
@@ -1039,6 +1065,8 @@ func (m model) View() string {
 		parts = append(parts, sBold.Render("IP para ping no túnel: ")+m.input.View())
 	case modeUDPCopies:
 		parts = append(parts, sBold.Render("Proporcao UDP (X = 1:X, X:X = rajada; X 1..8): ")+m.input.View()+sDim.Render("  [Enter] ok  [Esc] cancelar"))
+	case modeEndpoint:
+		parts = append(parts, sBold.Render("Novo endpoint (IP ou IP:porta): ")+m.input.View()+sDim.Render("  [Enter] ok  [Esc] cancelar"))
 	case modeDelete:
 		parts = append(parts, lipgloss.NewStyle().Foreground(cRed).Bold(true).Render(
 			fmt.Sprintf("Remover %s? [s/y] sim  [qualquer tecla] não", m.configs[m.cursor])))
