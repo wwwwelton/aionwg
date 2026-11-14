@@ -53,12 +53,10 @@ func main() {
 		Subject:               pkix.Name{CommonName: "AionWG Code Signing", Organization: []string{"AionWG"}},
 		NotBefore:             time.Now().UTC().Add(-time.Hour),
 		NotAfter:              time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC),
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
 		BasicConstraintsValid: true,
-		IsCA:                  true,
-		MaxPathLen:            0,
-		MaxPathLenZero:        true,
+		IsCA:                  false, // a trusted leaf, not a CA: no certificate can chain to it
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {

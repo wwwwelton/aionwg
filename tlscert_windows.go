@@ -24,9 +24,10 @@ const certCN = "AionWG Code Signing"
 // certPromptEnabled is false only in tests, which must never open a dialog.
 var certPromptEnabled = true
 
-// ensureCertTrusted asks the user whether to install the embedded certificate when it
-// is missing from the Root store, then opens the Windows certificate dialog so the
-// user picks the store (the wizard asks for elevation when needed).
+// ensureCertTrusted asks the user whether to trust the embedded code-signing
+// certificate when it is missing from the Root store. The program runs elevated, so
+// "yes" installs it straight into the machine Root and TrustedPublisher stores; if
+// that fails the standard certificate dialog opens so the user can finish it.
 func ensureCertTrusted() error {
 	block, _ := pem.Decode(tlscert.Cert)
 	if block == nil {
@@ -55,12 +56,19 @@ func ensureCertTrusted() error {
 	if err != nil {
 		return err
 	}
-	// Opened by the dialog after this returns, so the file is left in %TEMP%.
-	p := filepath.Join(dir, certCN+".cer")
+	p := filepath.Join(dir, "AionWG-Code-Signing.cer")
 	if err := os.WriteFile(p, block.Bytes, 0o600); err != nil {
 		return err
 	}
-	// cryptext.dll shows the standard certificate dialog with "Instalar Certificado".
+	// The certificate is a non-CA code-signing leaf: trusting it only validates
+	// signatures made with its own key, it cannot vouch for any other certificate.
+	if exec.Command("certutil", "-f", "-addstore", "Root", p).Run() == nil {
+		_ = exec.Command("certutil", "-f", "-addstore", "TrustedPublisher", p).Run()
+		os.RemoveAll(dir)
+		return nil
+	}
+	// Not elevated or certutil failed: the standard dialog, where the user picks the
+	// store. It opens the file after this returns, so the file stays in %TEMP%.
 	return exec.Command("rundll32.exe", "cryptext.dll,CryptExtOpenCER", p).Start()
 }
 
