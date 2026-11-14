@@ -53,12 +53,12 @@ func TestEndpointCandidatesAreDerivedFromTheEndpoint(t *testing.T) {
 	noDNS := func(string) ([]netip.Addr, error) { return nil, errors.New("no dns") }
 	pub := netip.MustParseAddrPort("203.0.113.1:51820")
 	c := endpointCandidates(pub, "203.0.113.1", noDNS)
-	if len(c) != 256 || c[0] != pub.Addr() {
-		t.Fatalf("public: current first + same host octet in the other 255 /24s of the /16, got %d", len(c))
+	if len(c) != 4 || c[0] != pub.Addr() {
+		t.Fatalf("public: current first + same host octet in the other 3 /24s of its /22, got %v", c)
 	}
 	for _, a := range c[1:] {
 		b := a.As4()
-		if b[0] != 203 || b[1] != 0 || b[3] != 1 || a == pub.Addr() {
+		if b[0] != 203 || b[1] != 0 || b[2] < 112 || b[2] > 115 || b[3] != 1 || a == pub.Addr() {
 			t.Fatalf("unexpected neighbour %v", a)
 		}
 	}

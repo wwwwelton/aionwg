@@ -9,10 +9,13 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -28,6 +31,7 @@ var (
 	routeSettle   = 12 * time.Second // game pings collected through the new path
 	routeCooldown = 3 * time.Minute  // after a kept switch
 	failCooldown  = 10 * time.Minute // after a failed or reverted one
+	discoverEvery = 10 * time.Minute // new endpoints are searched at most this often, only while the game is idle
 )
 
 // pickRoute returns the endpoint whose direct leg beats curLeg by routeMargin,
@@ -78,9 +82,9 @@ func loadRoutes(path, profile string) []netip.AddrPort {
 	return out
 }
 
-// saveRoute remembers ep for profile (no duplicates) without touching any
-// WireGuard profile.
-func saveRoute(path, profile string, ep netip.AddrPort) error {
+// mutateRoutes applies f to the routes file (missing or corrupt = empty) and
+// writes it back atomically when f reports a change.
+func mutateRoutes(path string, f func(m map[string][]string) bool) error {
 	var m map[string][]string
 	if b, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(b, &m)
@@ -88,12 +92,9 @@ func saveRoute(path, profile string, ep netip.AddrPort) error {
 	if m == nil {
 		m = map[string][]string{}
 	}
-	for _, s := range m[profile] {
-		if s == ep.String() {
-			return nil
-		}
+	if !f(m) {
+		return nil
 	}
-	m[profile] = append(m[profile], ep.String())
 	b, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
@@ -119,4 +120,68 @@ func saveRoute(path, profile string, ep netip.AddrPort) error {
 		return err
 	}
 	return nil
+}
+
+// saveRoute remembers ep for profile (no duplicates) without touching any
+// WireGuard profile.
+func saveRoute(path, profile string, ep netip.AddrPort) error {
+	return mutateRoutes(path, func(m map[string][]string) bool {
+		for _, s := range m[profile] {
+			if s == ep.String() {
+				return false
+			}
+		}
+		m[profile] = append(m[profile], ep.String())
+		return true
+	})
+}
+
+// badTTL is how long an endpoint that failed a handshake is not tried again.
+const badTTL = 7 * 24 * time.Hour
+
+func badKey(profile string) string { return profile + "|bad" }
+
+// parseBad reads a "ip@unixSeconds" entry.
+func parseBad(s string) (netip.Addr, time.Time, bool) {
+	a, ts, ok := strings.Cut(s, "@")
+	if !ok {
+		return netip.Addr{}, time.Time{}, false
+	}
+	addr, err := netip.ParseAddr(a)
+	sec, err2 := strconv.ParseInt(ts, 10, 64)
+	if err != nil || err2 != nil {
+		return netip.Addr{}, time.Time{}, false
+	}
+	return addr, time.Unix(sec, 0), true
+}
+
+// saveBad remembers that ep did not complete a handshake so later connections
+// skip it for badTTL (repeated failed handshakes can get a key rate-limited).
+func saveBad(path, profile string, ep netip.AddrPort, now time.Time) error {
+	return mutateRoutes(path, func(m map[string][]string) bool {
+		var keep []string
+		for _, s := range m[badKey(profile)] {
+			if a, at, ok := parseBad(s); ok && a != ep.Addr() && now.Sub(at) < badTTL {
+				keep = append(keep, s)
+			}
+		}
+		m[badKey(profile)] = append(keep, fmt.Sprintf("%s@%d", ep.Addr(), now.Unix()))
+		return true
+	})
+}
+
+// loadBad returns the addresses that failed a handshake for profile less than
+// badTTL ago; a missing or corrupt file yields none.
+func loadBad(path, profile string, now time.Time) map[netip.Addr]bool {
+	out := map[netip.Addr]bool{}
+	var m map[string][]string
+	if b, err := os.ReadFile(path); err != nil || json.Unmarshal(b, &m) != nil {
+		return out
+	}
+	for _, s := range m[badKey(profile)] {
+		if a, at, ok := parseBad(s); ok && now.Sub(at) < badTTL {
+			out[a] = true
+		}
+	}
+	return out
 }

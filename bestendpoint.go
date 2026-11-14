@@ -3,7 +3,7 @@ package main
 // Optional route optimisation, no addresses built in or configured. At connect
 // time the candidates are derived from the profile's endpoint itself: every
 // IPv4 its host name resolves to, plus (for a public endpoint) the addresses
-// with the same host octet in the other /24 blocks of its /16. One ICMP echo
+// with the same host octet in the other /24 blocks of its /22. One ICMP echo
 // ranks them all, medians confirm the best few, and a throwaway WireGuard
 // handshake (engine side) decides which one is really a WireGuard server, since
 // many neighbours answer ping but are unrelated hosts. Nothing changes when the
@@ -59,7 +59,8 @@ func endpointCandidates(cur netip.AddrPort, host string, lookup func(string) ([]
 	}
 	if a := cur.Addr(); a.Is4() && a.IsGlobalUnicast() && !a.IsPrivate() && !cgnat.Contains(a) {
 		b := a.As4()
-		for n := 0; n < 256; n++ {
+		base := int(b[2] &^ 3) // the endpoint's /22: good neighbours sit in consecutive /24 blocks
+		for n := base; n < base+4; n++ {
 			b[2] = byte(n)
 			add(netip.AddrFrom4(b))
 		}
@@ -171,6 +172,18 @@ func handshakenPeers(ipc string) map[string]bool {
 			if v != "0" && pk != "" {
 				out[pk] = true
 			}
+		}
+	}
+	return out
+}
+
+// dropAddrs removes the addresses in drop from cands, never the first one (the
+// current endpoint).
+func dropAddrs(cands []netip.Addr, drop map[netip.Addr]bool) []netip.Addr {
+	out := cands[:1:1]
+	for _, a := range cands[1:] {
+		if !drop[a] {
+			out = append(out, a)
 		}
 	}
 	return out
