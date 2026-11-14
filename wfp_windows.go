@@ -23,7 +23,6 @@ const wfpFallbackTTL = 2 * time.Second
 // wfpMonitor owns the SOCKET handle and the process tree for one engine.
 type wfpMonitor struct {
 	table  *wfpTable
-	access *accessLog // loopback connects go here; nil disables it
 	h      divertHandle
 	logf   func(string, ...any)
 	stop   chan struct{}
@@ -44,8 +43,8 @@ type wfpMonitor struct {
 // port is answered from the system table instead. The handle is sniff-only and
 // receive-only (mandatory for this layer), so it can never block or delay a
 // socket operation: a stuck AionWG cannot freeze the apps it watches.
-func startWFPMonitor(table *wfpTable, access *accessLog, logf func(string, ...any)) *wfpMonitor {
-	m := &wfpMonitor{table: table, access: access, logf: logf, stop: make(chan struct{})}
+func startWFPMonitor(table *wfpTable, logf func(string, ...any)) *wfpMonitor {
+	m := &wfpMonitor{table: table, logf: logf, stop: make(chan struct{})}
 	m.refreshProcesses()
 	m.wg.Add(1)
 	go m.processLoop()
@@ -129,9 +128,6 @@ func (m *wfpMonitor) eventLoop() {
 				m.refreshProcesses()
 			}
 			m.table.Apply(ev, time.Now())
-			if ev.loopbackConnect() && m.access != nil {
-				m.access.add(m.table.ProcName(ev.pid), ev.remote)
-			}
 		}
 	}
 }
