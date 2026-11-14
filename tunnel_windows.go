@@ -53,6 +53,11 @@ type natEntry struct {
 	last       time.Time
 }
 
+// mirroredClass: every WFP-selected app feeds the DPS meter mirror.
+func mirroredClass(c uint8) bool {
+	return c == classGame || c == classApp
+}
+
 // natKey separates IPv4/IPv6 sockets that share a port number.
 func natKey(proto uint8, v6 bool, port uint16) portKey {
 	if v6 {
@@ -63,23 +68,23 @@ func natKey(proto uint8, v6 bool, port uint16) portKey {
 
 // EngineOptions are the user settings the engine needs.
 type EngineOptions struct {
-	Processes    []string
-	PingTarget   string
-	Mirror       bool
+	Processes        []string
+	PingTarget       string
+	Mirror           bool
 	MirrorNoLoopback bool // skip the 127.0.0.1 TCP replay; AionWG-Meter feed unaffected
-	UDPDuplicate bool // send game UDP extra copies through the tunnel
-	UDPOriginals int  // A of A:B ratio
-	UDPCopies    int  // B of A:B ratio
-	UDPForce     bool // also copy game UDP outside AllowedIPs; never DNS/LAN/full tunnel
-	UDPNewestOut bool // opt-in latest-first ordering of primary game UDP sends
-	UDPNewestIn  bool // opt-in latest-first ordering of primary game UDP arrivals
-	FullTunnel   bool
-	NoDNS        bool     // full tunnel: do NOT redirect DNS into the tunnel
-	WFP          bool     // tunnel only WFPApps; replaces the port and full-tunnel modes
-	WFPApps      []string // executables the user picked for WFP mode
-	ConfigPath   string   // imported profile receiving learned WFP destinations
-	ConfigPaths  []string
-	BestEndpoint bool // monitor and try faster endpoints while connected
+	UDPDuplicate     bool // send game UDP extra copies through the tunnel
+	UDPOriginals     int  // A of A:B ratio
+	UDPCopies        int  // B of A:B ratio
+	UDPForce         bool // also copy game UDP outside AllowedIPs; never DNS/LAN/full tunnel
+	UDPNewestOut     bool // opt-in latest-first ordering of primary game UDP sends
+	UDPNewestIn      bool // opt-in latest-first ordering of primary game UDP arrivals
+	FullTunnel       bool
+	NoDNS            bool     // full tunnel: do NOT redirect DNS into the tunnel
+	WFP              bool     // tunnel only WFPApps; replaces the port and full-tunnel modes
+	WFPApps          []string // executables the user picked for WFP mode
+	ConfigPath       string   // imported profile receiving learned WFP destinations
+	ConfigPaths      []string
+	BestEndpoint     bool // monitor and try faster endpoints while connected
 }
 
 // Diag are counters for the diagnostics panel.
@@ -157,9 +162,12 @@ type outboundUDPJob struct {
 }
 
 type Engine struct {
-	conf         *WGConf
-	endpoints    []netip.AddrPort // as resolved at start; use eps() after that
-	epCur        atomic.Pointer[[]netip.AddrPort]
+	conf      *WGConf
+	endpoints []netip.AddrPort // as resolved at start; use eps() after that
+	epCur     atomic.Pointer[[]netip.AddrPort]
+	// primaryHold is set while the primary endpoint is being switched: new flows
+	// and duplicates use the extra UDP paths instead.
+	primaryHold  atomic.Bool
 	epMu         sync.Mutex // serialises runtime endpoint switches
 	dev          *device.Device
 	tun          *splitTun
@@ -180,7 +188,7 @@ type Engine struct {
 	meterMu      sync.Mutex
 	meter        *meterAdapter // Wintun copy for Npcap-based DPS meters
 	meterErr     string
-	meterDup     meterDedup // one copy of each inbound reply to the meter; the game gets all
+	meterDup     meterDedup                    // one copy of each inbound reply to the meter; the game gets all
 	meterOpening bool                          // protected by meterMu; never initialize Wintun on the TUI goroutine
 	meterOpener  func() (*meterAdapter, error) // injectable for regression tests
 	addr4        netip.Addr
@@ -596,7 +604,7 @@ func (e *Engine) capture(pkt []byte, addr *divertAddress) bool {
 		}
 		return false
 	}
-	if isGame {
+	if mirroredClass(class) {
 		e.mirror.packet(true, pkt, &p)
 		if e.mirror.enabled.Load() {
 			e.meterWrite(pkt[:pktLen(pkt, &p)])
@@ -721,9 +729,9 @@ func (e *Engine) processInbound(pkt []byte) {
 	ne := e.nat[natKey(p.proto, p.v6, p.dstPort)]
 	var local, dnsOrig netip.Addr
 	var ifIdx, subIfIdx uint32
-	var game bool
+	var game, mirrored bool
 	if ne != nil {
-		local, dnsOrig, game = ne.local, ne.dnsOrig, ne.game
+		local, dnsOrig, game, mirrored = ne.local, ne.dnsOrig, ne.game, mirroredClass(ne.class)
 		ifIdx, subIfIdx = ne.ifIdx, ne.subIfIdx
 		ne.last = time.Now()
 	}
@@ -732,7 +740,7 @@ func (e *Engine) processInbound(pkt []byte) {
 		e.cInNoNAT.Add(1)
 		return
 	}
-	if game {
+	if mirrored {
 		e.mirror.packet(false, pkt, &p)
 	}
 	n := pktLen(pkt, &p)
@@ -748,7 +756,7 @@ func (e *Engine) processInbound(pkt []byte) {
 		clampMSS(out, &p, e.maxMSS4)
 	}
 	fixChecksums(out, &p)
-	if game && e.mirror.enabled.Load() && !e.meterDup.seen(out, &p, time.Now()) {
+	if mirrored && e.mirror.enabled.Load() && !e.meterDup.seen(out, &p, time.Now()) {
 		e.meterWrite(out)
 	}
 	if e.injectInbound(out, p.v6, ifIdx, subIfIdx) {
@@ -1336,13 +1344,15 @@ func (e *Engine) SetEndpoint(ep netip.AddrPort) error {
 	if e.closing.Load() {
 		return errors.New("túnel fechando")
 	}
-	if e.pathEndpointUsed(ep) {
-		return fmt.Errorf("endpoint %s já está em outro caminho UDP", ep)
-	}
 	prev := e.eps()
 	if prev[0] == ep {
 		return nil
 	}
+	// An extra path holding ep gives it to the primary; the primary's old
+	// endpoint goes to that path once the handshake is confirmed.
+	j := e.pathIndexUsing(ep)
+	e.primaryHold.Store(true)
+	defer e.primaryHold.Store(false)
 	apply := func(to netip.AddrPort) error {
 		next := append([]netip.AddrPort{to}, prev[1:]...)
 		if err := e.dev.IpcSet(e.conf.UAPI(next)); err != nil {
@@ -1366,6 +1376,16 @@ func (e *Engine) SetEndpoint(ep netip.AddrPort) error {
 		}
 	}
 	if ok {
+		if j >= 0 {
+			p := e.paths[j]
+			if err := p.setEndpoint(prev[0]); err != nil {
+				if rerr := apply(prev[0]); rerr != nil {
+					return fmt.Errorf("caminho %d não aceitou %s e o principal não voltou: %w", j+2, prev[0], errors.Join(err, rerr))
+				}
+				return fmt.Errorf("caminho %d não aceitou %s: %w", j+2, prev[0], err)
+			}
+			e.logf("UDP caminho %d: trocado para %s (o principal assumiu %s)", j+2, prev[0], ep)
+		}
 		e.routeLog("rota: endpoint trocado %s -> %s (handshake ok; o perfil não foi alterado)", prev[0], ep)
 		e.learn(ep)
 		e.kickTrace()

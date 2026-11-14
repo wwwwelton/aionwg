@@ -230,3 +230,24 @@ func TestUDPPathsStatusShowsUnresponsivePaths(t *testing.T) {
 		}
 	}
 }
+
+func TestSelectPathAvoidsPrimaryWhileSwitching(t *testing.T) {
+	e := &Engine{}
+	p := &udpPath{}
+	p.lastRx.Store(time.Now().UnixNano())
+	e.paths[0] = p
+	e.primaryHold.Store(true)
+	for port := uint16(1); port <= 50; port++ {
+		if got := e.selectPath(portKey{proto: 17, port: port}); got != 1 {
+			t.Fatalf("port %d during switch uses path %d, want extra path 1", port, got)
+		}
+	}
+	e.primaryHold.Store(false)
+	seen := map[uint8]bool{}
+	for port := uint16(1); port <= 50; port++ {
+		seen[e.selectPath(portKey{proto: 17, port: port})] = true
+	}
+	if !seen[0] || !seen[1] {
+		t.Fatalf("after switch both paths should be used, got %v", seen)
+	}
+}

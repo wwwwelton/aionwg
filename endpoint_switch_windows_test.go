@@ -103,3 +103,67 @@ func TestPingStateKeepsTheLastTenRepliesOnly(t *testing.T) {
 		t.Fatalf("median %v", got)
 	}
 }
+
+// Switching the primary to an endpoint an extra path holds swaps the two: the
+// path takes over the primary's old endpoint and the connection stays up.
+func TestSetEndpointSwapsWithExtraPathHoldingIt(t *testing.T) {
+	cpriv, _ := ecdh.X25519().GenerateKey(rand.Reader)
+	spriv, _ := ecdh.X25519().GenerateKey(rand.Reader)
+	srvPort, deadPort := freeUDPPort(t), freeUDPPort(t)
+
+	srv := device.NewDevice(newSplitTun(1420), conn.NewDefaultBind(), device.NewLogger(device.LogLevelSilent, ""))
+	defer srv.Close()
+	if err := srv.IpcSet(fmt.Sprintf("private_key=%s\nlisten_port=%d\npublic_key=%s\nallowed_ip=10.9.0.2/32\n",
+		hex.EncodeToString(spriv.Bytes()), srvPort, hex.EncodeToString(cpriv.PublicKey().Bytes()))); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Up(); err != nil {
+		t.Fatal(err)
+	}
+	b64 := base64.StdEncoding.EncodeToString
+	conf, err := ParseConfig(fmt.Sprintf("[Interface]\nPrivateKey = %s\nAddress = 10.9.0.2/32\n[Peer]\nPublicKey = %s\nEndpoint = 127.0.0.1:%d\nAllowedIPs = 10.9.0.1/32\n",
+		b64(cpriv.Bytes()), b64(spriv.PublicKey().Bytes()), deadPort))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop := netip.MustParseAddr("127.0.0.1")
+	dead := netip.AddrPortFrom(loop, deadPort)
+	good := netip.AddrPortFrom(loop, srvPort)
+
+	cli := device.NewDevice(newSplitTun(conf.MTU), conn.NewDefaultBind(), device.NewLogger(device.LogLevelSilent, ""))
+	defer cli.Close()
+	if err := cli.IpcSet(conf.UAPI([]netip.AddrPort{dead})); err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.Up(); err != nil {
+		t.Fatal(err)
+	}
+	// An extra path device that currently holds the server endpoint.
+	// Its own key keeps it from racing the primary's handshakes at the server.
+	pk, _ := ecdh.X25519().GenerateKey(rand.Reader)
+	pconf := *conf
+	pconf.PrivateKey = pk.Bytes()
+	pd := device.NewDevice(newSplitTun(conf.MTU), conn.NewDefaultBind(), device.NewLogger(device.LogLevelSilent, ""))
+	defer pd.Close()
+	if err := pd.IpcSet(pconf.UAPI([]netip.AddrPort{good})); err != nil {
+		t.Fatal(err)
+	}
+	p := &udpPath{dev: pd, peerKey: hex.EncodeToString(spriv.PublicKey().Bytes()), tun: newSplitTun(1420)}
+	p.endpoint.Store(&good)
+
+	e := &Engine{conf: conf, dev: cli, pings: map[uint16]*pingState{0: {}}, logf: t.Logf}
+	e.epCur.Store(&[]netip.AddrPort{dead})
+	e.paths[0] = p
+	defer func(old time.Duration) { endpointSwitchWait = old }(endpointSwitchWait)
+	endpointSwitchWait = 3 * time.Second
+
+	if err := e.SetEndpoint(good); err != nil {
+		t.Fatalf("swap with extra path: %v", err)
+	}
+	if got := e.eps()[0]; got != good {
+		t.Fatalf("primary endpoint %v, want %v", got, good)
+	}
+	if got := p.currentEndpoint(); got != dead {
+		t.Fatalf("extra path endpoint %v, want the primary's old %v", got, dead)
+	}
+}

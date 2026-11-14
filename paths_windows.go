@@ -43,12 +43,17 @@ func (e *Engine) startUDPPaths() error {
 }
 
 func (e *Engine) pathEndpointUsed(ep netip.AddrPort) bool {
-	for _, p := range e.paths {
+	return e.pathIndexUsing(ep) >= 0
+}
+
+// pathIndexUsing returns the extra path index holding ep, or -1.
+func (e *Engine) pathIndexUsing(ep netip.AddrPort) int {
+	for i, p := range e.paths {
 		if p != nil && p.currentEndpoint() == ep {
-			return true
+			return i
 		}
 	}
-	return false
+	return -1
 }
 
 // pathLoop probes one path per tick, avoiding simultaneous handshakes with the
@@ -121,13 +126,20 @@ func (e *Engine) pathLoop() {
 // pinned to their selected exit, unless it stops responding.
 func (e *Engine) selectPath(key portKey) uint8 {
 	var active [maxPaths]uint8
-	n := 1 // primary path
+	n := 0
+	if !e.primaryHold.Load() {
+		active[n] = 0 // primary path
+		n++
+	}
 	now := time.Now()
 	for i, p := range e.paths {
 		if p != nil && p.active(now) {
 			active[n] = uint8(i + 1)
 			n++
 		}
+	}
+	if n == 0 {
+		return 0
 	}
 	return active[(uint32(key.port)+uint32(key.proto)*257)%uint32(n)]
 }
@@ -147,7 +159,7 @@ func (e *Engine) pathTun(index uint8) *splitTun {
 func (e *Engine) duplicateTun(original uint8) *splitTun {
 	var active [maxPaths]uint8
 	n := 0
-	if original != 0 {
+	if original != 0 && !e.primaryHold.Load() {
 		active[n] = 0
 		n++
 	}
