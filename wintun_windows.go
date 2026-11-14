@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -41,6 +42,9 @@ type meterAdapter struct {
 	closed  atomic.Bool
 	written atomic.Uint64
 	full    atomic.Uint64
+	latSum  atomic.Int64 // ns spent in write() (incl. waiting for mu) since the last takeLatency
+	latMax  atomic.Int64
+	latN    atomic.Uint64
 }
 
 func openMeterAdapter() (*meterAdapter, error) {
@@ -72,6 +76,14 @@ func (m *meterAdapter) write(pkt []byte) {
 	if m == nil || m.closed.Load() || len(pkt) == 0 {
 		return
 	}
+	start := time.Now()
+	defer func() {
+		d := int64(time.Since(start))
+		m.latSum.Add(d)
+		m.latN.Add(1)
+		for old := m.latMax.Load(); d > old && !m.latMax.CompareAndSwap(old, d); old = m.latMax.Load() {
+		}
+	}()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed.Load() {
@@ -86,6 +98,19 @@ func (m *meterAdapter) write(pkt []byte) {
 	copy(unsafe.Slice((*byte)(ptr), len(pkt)), pkt)
 	procWtSend.Call(m.session, p)
 	m.written.Add(1)
+}
+
+// takeLatency returns the average and maximum write() time since the last call.
+func (m *meterAdapter) takeLatency() (avg, max time.Duration, n uint64) {
+	if m == nil {
+		return
+	}
+	n = m.latN.Swap(0)
+	sum, mx := m.latSum.Swap(0), m.latMax.Swap(0)
+	if n > 0 {
+		avg = time.Duration(sum / int64(n))
+	}
+	return avg, time.Duration(mx), n
 }
 
 func (m *meterAdapter) Close() {

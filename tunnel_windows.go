@@ -773,6 +773,12 @@ func (e *Engine) housekeeping() {
 					ack.Last.Round(time.Millisecond), ack.Avg.Round(time.Millisecond), ack.N,
 					resp.Last.Round(time.Millisecond), resp.Avg.Round(time.Millisecond), resp.N)
 			}
+			e.meterMu.Lock()
+			mt := e.meter
+			e.meterMu.Unlock()
+			if avg, mx, n := mt.takeLatency(); n > 0 {
+				e.logDisk("[meter-lat] escritas=%d no adaptador: media=%v max=%v", n, avg.Round(time.Microsecond), mx.Round(time.Microsecond))
+			}
 			prev = cur
 		case <-tk.C:
 			cut := time.Now().Add(-5 * time.Minute)
