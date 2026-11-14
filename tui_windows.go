@@ -181,6 +181,7 @@ func connectCmd(name string, s Settings) tea.Cmd {
 		}
 		eng, err := StartEngine(conf, EngineOptions{
 			Processes: s.Processes, PingTarget: s.PingTarget, Mirror: s.Mirror,
+			MirrorNoLoopback: s.MirrorNoLoopback,
 			UDPDuplicate: s.UDPDuplicate, UDPOriginals: s.UDPOriginals, UDPCopies: s.UDPCopies, UDPForce: s.UDPForce,
 			UDPNewestOut: s.UDPNewestOut, UDPNewestIn: s.UDPNewestIn,
 			FullTunnel: s.FullTunnel, NoDNS: s.NoDNS,

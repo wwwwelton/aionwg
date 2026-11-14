@@ -139,6 +139,7 @@ func (f *mirrorFlow) send(dir int, b []byte) {
 
 type mirror struct {
 	enabled   atomic.Bool
+	noLoopback atomic.Bool // true: no TCP replay on 127.0.0.1; meter feed is written separately
 	rttAck    rttStat // outbound payload -> ACK that covers it, as seen by the mirror
 	rttResp   rttStat // outbound payload -> first payload back (application-level)
 	logf      func(string, ...any)
@@ -224,7 +225,7 @@ func (m *mirror) Flows() []string {
 
 // packet feeds one game TCP packet (either direction, plaintext).
 func (m *mirror) packet(outbound bool, pkt []byte, p *pktInfo) {
-	if !m.enabled.Load() || p.proto != protoTCP {
+	if !m.enabled.Load() || m.noLoopback.Load() || p.proto != protoTCP {
 		return
 	}
 	t := pkt[p.l4:pktLen(pkt, p)]

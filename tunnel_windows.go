@@ -66,6 +66,7 @@ type EngineOptions struct {
 	Processes    []string
 	PingTarget   string
 	Mirror       bool
+	MirrorNoLoopback bool // skip the 127.0.0.1 TCP replay; AionWG-Meter feed unaffected
 	UDPDuplicate bool // send game UDP extra copies through the tunnel
 	UDPOriginals int  // A of A:B ratio
 	UDPCopies    int  // B of A:B ratio
@@ -353,6 +354,7 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 	e.owner = newOwnerTracker(opt.Processes)
 	e.mirror = newMirror(opt.Mirror, logf)
 	e.mirror.trace = e.logDisk
+	e.mirror.noLoopback.Store(opt.MirrorNoLoopback)
 	e.udpDup = newUDPDuplicator[uint8](udpDupQueueSize, opt.UDPDuplicate)
 	e.udpDup.setRatio(opt.UDPOriginals, opt.UDPCopies)
 	e.udpForce.Store(opt.UDPForce)

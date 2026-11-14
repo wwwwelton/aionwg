@@ -197,3 +197,16 @@ func TestMirrorMeasuresAckAndReplyRTT(t *testing.T) {
 		t.Fatalf("reply rtt = %+v", resp)
 	}
 }
+
+func TestMirrorNoLoopbackCreatesNoFlow(t *testing.T) {
+	m := newMirror(true, t.Logf)
+	defer m.Close()
+	m.noLoopback.Store(true)
+	feedPkt(m, true, mkTCP("10.0.0.2", "1.2.3.4", 45000, 443, 1, 0x02, nil))
+	m.mu.Lock()
+	n := len(m.flows)
+	m.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("flows=%d with loopback replay disabled", n)
+	}
+}
