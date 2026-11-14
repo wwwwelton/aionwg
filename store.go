@@ -194,7 +194,7 @@ func exportOfficial(name string, observed, endpoints []netip.Addr) (string, int,
 	}
 	base := strings.TrimSuffix(name, filepath.Ext(name))
 	full := RenderOfficial(string(raw), "sistema inteiro (rede local fora do túnel)", FullTunnelAllowed(c, endpoints), true)
-	game := RenderOfficial(string(raw), fmt.Sprintf("só AION 2 + Steam (faixas NCSOFT/Valve + %d IPs vistos)", len(observed)),
+	game := RenderOfficial(string(raw), fmt.Sprintf("só AION 2 + Steam (%d IPs vistos pelo AionWG)", len(observed)),
 		GameAllowed(c, observed, endpoints), false)
 	if err := os.WriteFile(filepath.Join(dir, base+"-sistema.conf"), []byte(full), 0o600); err != nil {
 		return "", 0, err

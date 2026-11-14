@@ -158,9 +158,8 @@ WireGuard oficial ([e])
   O cliente oficial não separa por programa, só por IP. O [e] gera, na pasta
   configs-wireguard-oficial ao lado do .exe:
     <nome>-sistema.conf  tudo pelo túnel, menos rede local e o próprio VPS
-    <nome>-jogo.conf     faixas de IP da NCSOFT, do servidor do AION 2 e da
-                         Valve/Steam + os IPs que o AionWG viu o jogo, a loja
-                         e a Steam usarem
+    <nome>-jogo.conf     só os IPs que o AionWG viu o jogo, a loja e a Steam
+                         usarem (/32 cada), mais a sub-rede do túnel
   Para o -jogo.conf ficar completo: conecte no AionWG, jogue alguns minutos
   (login, troca de canal/zona, abrir a loja) e só então aperte [e].
   No cliente oficial: "Importar túnel(s) de arquivo". Não use junto com o
