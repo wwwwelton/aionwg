@@ -264,6 +264,11 @@ func (c *WGConf) UAPI(endpoints []netip.AddrPort) string {
 		for _, a := range p.AllowedIPs {
 			fmt.Fprintf(&b, "allowed_ip=%s\n", a.String())
 		}
+		// Software routing (Engine.capture) decides what enters the tunnel; the
+		// device must accept any destination so forced UDP copies are not dropped.
+		if len(c.Peers) == 1 {
+			b.WriteString("allowed_ip=0.0.0.0/0\nallowed_ip=::/0\n")
+		}
 	}
 	return b.String()
 }

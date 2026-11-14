@@ -28,26 +28,14 @@ func (e *Engine) runUDPDuplicateWorker() {
 		}
 	}
 
-	e.udpDup.run(e.stop, func(pkt []byte, t dupTarget) error {
+	e.udpDup.run(e.stop, func(pkt []byte, _ struct{}) error {
 		if e.closing.Load() {
 			return windows.ERROR_OPERATION_ABORTED
 		}
-		if t.tunnel {
-			// Same SNAT'd packet as the original, through WireGuard (a fresh
-			// transport counter each, so the peer accepts both). pkt is shared
-			// between jobs, so the tunnel gets its own copy.
-			e.tun.inject(clonePktBuf(pkt))
-			return nil
-		}
-		// Direct copy keeps its original Windows IP/source port and goes through
-		// Windows' ordinary outbound route (WinDivert ignores IfIdx for outbound).
-		return e.h.send(pkt, &t.addr)
+		// Same SNAT'd packet as the original, through WireGuard (a fresh
+		// transport counter each, so the peer accepts both). pkt is shared
+		// between jobs, so the tunnel gets its own copy.
+		e.tun.inject(clonePktBuf(pkt))
+		return nil
 	})
-}
-
-// dupTarget says where a duplicate goes: through the tunnel (pkt is the SNAT'd
-// tunnel packet) or straight out via Windows (pkt is the original, addr its capture).
-type dupTarget struct {
-	addr   divertAddress
-	tunnel bool
 }

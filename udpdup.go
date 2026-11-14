@@ -3,7 +3,7 @@ package main
 // Secondary UDP copies are best-effort. The WireGuard primary path is not
 // delayed by this queue. Each original datagram schedules copies (1:1, 2:1,
 // etc), with the most RECENT datagram always first among pending copies.
-// Copies go through the tunnel (Force UDP ones use the direct Windows route) and can be rejected as duplicates by the
+// Copies go through the tunnel and can be rejected as duplicates by the
 // game server. Never claim this lowers ping.
 
 import (
