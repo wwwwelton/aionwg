@@ -292,6 +292,11 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 	e.maxMSS4 = uint16(conf.MTU - 40)
 	e.maxMSS6 = uint16(conf.MTU - 60)
 
+	profileKey := filepath.Base(opt.ConfigPath)
+	var learnedEPs []netip.AddrPort // proven for this profile: tried first, no neighbour sweep
+	if opt.BestEndpoint {
+		learnedEPs = loadRoutes(routesPath(), profileKey)
+	}
 	for _, p := range conf.Peers {
 		ep, err := ResolveEndpoint(p.Endpoint)
 		if err != nil {
@@ -299,13 +304,17 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 		}
 		profileEP := ep
 		if opt.BestEndpoint && ep.Addr().Is4() {
-			ep = chooseEndpoint(conf, p, ep, logf)
+			var learned []netip.AddrPort
+			if len(e.endpoints) == 0 {
+				learned = learnedEPs
+			}
+			ep = chooseEndpoint(conf, p, ep, learned, logf)
 		}
 		if len(e.endpoints) == 0 {
-			e.profile = filepath.Base(opt.ConfigPath)
+			e.profile = profileKey
 			e.learned = map[netip.AddrPort]bool{profileEP: true, ep: true}
 			if opt.BestEndpoint {
-				for _, r := range loadRoutes(routesPath(), e.profile) {
+				for _, r := range learnedEPs {
 					e.learned[r] = true
 				}
 				if ep != profileEP {
@@ -1405,12 +1414,17 @@ func probeHandshake(conf *WGConf, p PeerConf, ep netip.AddrPort, wait time.Durat
 	return false
 }
 
-// chooseEndpoint is the optional route optimisation: ICMP ranks the dynamic
-// candidates and a throwaway handshake confirms one. It returns ep unchanged
-// when nothing better is proven.
-func chooseEndpoint(conf *WGConf, p PeerConf, ep netip.AddrPort, logf func(string, ...any)) netip.AddrPort {
+// chooseEndpoint is the optional route optimisation. Endpoints already proven
+// for the profile are tried first and make the neighbour sweep unnecessary;
+// without any, ICMP ranks dynamically discovered candidates. Either way a
+// throwaway handshake confirms the choice. It returns ep unchanged when
+// nothing better is proven.
+func chooseEndpoint(conf *WGConf, p PeerConf, ep netip.AddrPort, learned []netip.AddrPort, logf func(string, ...any)) netip.AddrPort {
 	host, _, _ := net.SplitHostPort(p.Endpoint)
-	cands := endpointCandidates(ep, host, lookupIPv4)
+	cands := learnedCandidates(ep, learned)
+	if len(cands) == 1 {
+		cands = endpointCandidates(ep, host, lookupIPv4)
+	}
 	curRTT, ranked := rankEndpoints(ep, cands, icmpOnce, icmpMedian)
 	switch {
 	case curRTT == 0:
@@ -1419,9 +1433,10 @@ func chooseEndpoint(conf *WGConf, p PeerConf, ep netip.AddrPort, logf func(strin
 		logf("rota: endpoint %s já é o mais rápido (%v, %d testados)", ep.Addr(), curRTT, len(cands))
 	default:
 		for _, r := range ranked {
-			if probeHandshake(conf, p, r.AddrPort, 2*time.Second) {
-				logf("rota: endpoint %s (%v) trocado por %s (%v, handshake ok)", ep.Addr(), curRTT, r.Addr(), r.RTT)
-				return r.AddrPort
+			cand := withLearnedPort(r.AddrPort, learned)
+			if probeHandshake(conf, p, cand, 2*time.Second) {
+				logf("rota: endpoint %s (%v) trocado por %s (%v, handshake ok)", ep.Addr(), curRTT, cand.Addr(), r.RTT)
+				return cand
 			}
 			logf("rota: %s (%v) respondeu a ICMP mas não ao WireGuard; descartado", r.Addr(), r.RTT)
 		}

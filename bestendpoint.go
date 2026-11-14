@@ -67,6 +67,32 @@ func endpointCandidates(cur netip.AddrPort, host string, lookup func(string) ([]
 	return cands
 }
 
+// learnedCandidates returns cur first, then the distinct IPv4 addresses of the
+// endpoints already proven for the profile. A single result means nothing
+// useful is known yet.
+func learnedCandidates(cur netip.AddrPort, learned []netip.AddrPort) []netip.Addr {
+	cands := []netip.Addr{cur.Addr()}
+	seen := map[netip.Addr]bool{cur.Addr(): true}
+	for _, l := range learned {
+		if a := l.Addr(); a.Is4() && !seen[a] {
+			seen[a] = true
+			cands = append(cands, a)
+		}
+	}
+	return cands
+}
+
+// withLearnedPort gives a ranked address the port it was learned with (the
+// ranking only knows the profile's port).
+func withLearnedPort(ep netip.AddrPort, learned []netip.AddrPort) netip.AddrPort {
+	for _, l := range learned {
+		if l.Addr() == ep.Addr() {
+			return l
+		}
+	}
+	return ep
+}
+
 type rankedEndpoint struct {
 	netip.AddrPort
 	RTT time.Duration
