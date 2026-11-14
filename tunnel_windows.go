@@ -1370,6 +1370,7 @@ func (e *Engine) SetEndpoint(ep netip.AddrPort) error {
 	}
 	prev := e.eps()
 	if prev[0] == ep {
+		e.routeLog("rota: já está em %s; nada a trocar", ep)
 		return nil
 	}
 	// An extra path holding ep gives it to the primary; the primary's old
