@@ -19,6 +19,7 @@ package main
 import (
 	"bufio"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -401,10 +402,12 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 		e.wg.Add(1)
 		go e.divertLoop()
 	}
+	e.wg.Add(3)
 	go e.housekeeping()
 	go e.pingLoop()
 	go e.traceLoop()
 	if opt.BestEndpoint {
+		e.wg.Add(1)
 		go e.routeLoop()
 	}
 	e.wg.Add(3)
@@ -744,6 +747,7 @@ func (e *Engine) relayICMPError(pkt []byte, p *pktInfo) {
 }
 
 func (e *Engine) housekeeping() {
+	defer e.wg.Done()
 	tk := time.NewTicker(30 * time.Second)
 	defer tk.Stop()
 	// The health snapshot goes to the file log so a drop can be read afterwards.
@@ -820,6 +824,7 @@ func (e *Engine) gameServer() netip.Addr {
 }
 
 func (e *Engine) pingLoop() {
+	defer e.wg.Done()
 	icmp, _ := newIcmpPinger()
 	if icmp != nil {
 		defer icmp.close()
@@ -1230,6 +1235,9 @@ func (e *Engine) SetEndpointString(v string) error {
 func (e *Engine) SetEndpoint(ep netip.AddrPort) error {
 	e.epMu.Lock()
 	defer e.epMu.Unlock()
+	if e.closing.Load() {
+		return errors.New("túnel fechando")
+	}
 	prev := e.eps()
 	if prev[0] == ep {
 		return nil
@@ -1250,9 +1258,11 @@ func (e *Engine) SetEndpoint(ep netip.AddrPort) error {
 	}
 	key := hex.EncodeToString(e.conf.Peers[0].PublicKey)
 	ok := false
-	for end := time.Now().Add(endpointSwitchWait); !ok && time.Now().Before(end); time.Sleep(100 * time.Millisecond) {
+	for end := time.Now().Add(endpointSwitchWait); !ok && time.Now().Before(end); {
 		ipc, _ := e.dev.IpcGet()
-		ok = handshakenPeers(ipc)[key]
+		if ok = handshakenPeers(ipc)[key]; !ok && !e.nap(100*time.Millisecond) {
+			return errors.New("túnel fechando")
+		}
 	}
 	if ok {
 		e.routeLog("rota: endpoint trocado %s -> %s (handshake ok; o perfil não foi alterado)", prev[0], ep)
@@ -1323,13 +1333,24 @@ func newIcmpPinger() (*icmpPinger, error) {
 	return &icmpPinger{h: r}, nil
 }
 
-func (p *icmpPinger) close() { procIcmpCloseHandle.Call(p.h) }
+// close waits for an echo in flight (p.mu) and disables the pinger for good.
+func (p *icmpPinger) close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.h != 0 {
+		procIcmpCloseHandle.Call(p.h)
+		p.h = 0
+	}
+}
 
 // ping returns the RTT and 0 on success; otherwise a Windows error code
 // (ICMP_ECHO_REPLY.Status such as 11010 timeout / 11003 host unreachable, or GetLastError).
 func (p *icmpPinger) ping(dst netip.Addr, timeout time.Duration) (time.Duration, uint32) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.h == 0 {
+		return 0, 1
+	}
 	a := dst.As4()
 	ip := *(*uint32)(unsafe.Pointer(&a[0])) // IPAddr is in network order in memory
 	data := []byte("aionwg")
@@ -1489,10 +1510,21 @@ func (e *Engine) gamePing() time.Duration {
 	return 0
 }
 
+// nap sleeps d and reports false when the engine is stopping.
+func (e *Engine) nap(d time.Duration) bool {
+	select {
+	case <-e.stop:
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
 // routeLoop is the live route monitor (see routemon.go): it only acts while the
 // game has traffic, spaces attempts out, and keeps a switch only if the game
 // ping measured through the new path is better.
 func (e *Engine) routeLoop() {
+	defer e.wg.Done()
 	tk := time.NewTicker(routeEvery)
 	defer tk.Stop()
 	var next time.Time
@@ -1548,6 +1580,9 @@ func (e *Engine) routeLoop() {
 		case <-e.stop:
 			return
 		case <-time.After(routeSettle):
+		}
+		if e.gameServer() != gs { // pingLoop switched target: the RTTs are not comparable
+			continue
 		}
 		after := e.gamePing()
 		if keepRoute(before, after) {
@@ -1614,7 +1649,7 @@ func (e *Engine) traceTunnel(dst netip.Addr) []Hop {
 		e.traceMu.Unlock()
 		e.tun.inject(buildICMPEchoTTL(src, dst, pingIDTrace, seq, uint8(ttl)))
 	}
-	for deadline := time.Now().Add(1500 * time.Millisecond); time.Now().Before(deadline); time.Sleep(25 * time.Millisecond) {
+	for deadline := time.Now().Add(1500 * time.Millisecond); time.Now().Before(deadline) && !e.closing.Load(); time.Sleep(25 * time.Millisecond) {
 		e.traceMu.Lock()
 		reached := false
 		for _, a := range e.traceGot {
@@ -1672,6 +1707,9 @@ func (e *Engine) traceDirect(dst netip.Addr) []Hop {
 func (p *icmpPinger) pingTTL(dst netip.Addr, ttl uint8, timeout time.Duration) (from netip.Addr, rtt time.Duration, ok bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.h == 0 {
+		return
+	}
 	a := dst.As4()
 	ip := *(*uint32)(unsafe.Pointer(&a[0]))
 	opt := struct { // IP_OPTION_INFORMATION
@@ -1715,6 +1753,7 @@ func (e *Engine) runTrace() {
 // traceLoop refreshes the route view shortly after connecting, every 45 s and
 // whenever the endpoint changes.
 func (e *Engine) traceLoop() {
+	defer e.wg.Done()
 	tk := time.NewTicker(45 * time.Second)
 	defer tk.Stop()
 	first := time.After(4 * time.Second)

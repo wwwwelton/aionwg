@@ -46,26 +46,36 @@ func (t *splitTun) Close() error {
 }
 
 func (t *splitTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
-	var p []byte
-	select {
-	case p = <-t.in:
-	case <-t.closed:
-		return 0, os.ErrClosed
+	n := 0
+	for n == 0 {
+		select {
+		case p := <-t.in:
+			n += t.take(bufs[n], sizes[n:], offset, p)
+		case <-t.closed:
+			return 0, os.ErrClosed
+		}
 	}
-	sizes[0] = copy(bufs[0][offset:], p)
-	putPktBuf(p)
-	n := 1
 	for n < len(bufs) {
 		select {
-		case p = <-t.in:
-			sizes[n] = copy(bufs[n][offset:], p)
-			putPktBuf(p)
-			n++
+		case p := <-t.in:
+			n += t.take(bufs[n], sizes[n:], offset, p)
 		default:
 			return n, nil
 		}
 	}
 	return n, nil
+}
+
+// take copies p into buf; a packet that does not fit (LSO/USO giants) is
+// dropped, never truncated into a valid-looking shorter packet.
+func (t *splitTun) take(buf []byte, sizes []int, offset int, p []byte) int {
+	defer putPktBuf(p)
+	if len(p) > len(buf)-offset {
+		t.drops.Add(1)
+		return 0
+	}
+	sizes[0] = copy(buf[offset:], p)
+	return 1
 }
 
 func (t *splitTun) Write(bufs [][]byte, offset int) (int, error) {

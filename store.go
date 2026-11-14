@@ -108,7 +108,11 @@ func saveSettings(s Settings) error {
 	s.UDPCopies = normalizeUDPCopies(s.UDPCopies)
 	s.UDPOriginals = normalizeUDPCopies(s.UDPOriginals)
 	b, _ := json.MarshalIndent(s, "", "  ")
-	return os.WriteFile(filepath.Join(appDir(), "settings.json"), b, 0o600)
+	tmp := filepath.Join(appDir(), "settings.json.tmp")
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, filepath.Join(appDir(), "settings.json"))
 }
 
 func listConfigs() []string {

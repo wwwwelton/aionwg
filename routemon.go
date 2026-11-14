@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -82,9 +83,13 @@ func loadRoutes(path, profile string) []netip.AddrPort {
 	return out
 }
 
+var routesMu sync.Mutex // serialises read-modify-write across engine goroutines
+
 // mutateRoutes applies f to the routes file (missing or corrupt = empty) and
 // writes it back atomically when f reports a change.
 func mutateRoutes(path string, f func(m map[string][]string) bool) error {
+	routesMu.Lock()
+	defer routesMu.Unlock()
 	var m map[string][]string
 	if b, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(b, &m)

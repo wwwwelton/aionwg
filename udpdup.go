@@ -97,12 +97,14 @@ func (d *udpDuplicator[A]) setEnabled(enabled bool) {
 // setRatio sets A:B: once A originals arrived, B copies are queued, newest
 // original first (1:B copies each original; A:A copies each original once).
 func (d *udpDuplicator[A]) setRatio(originals, copies int) {
+	// Store first, bump generation last: offer() rechecks the generation after
+	// reading both values, so a torn A/B read is always discarded.
+	d.originals.Store(int32(normalizeUDPCopies(originals)))
+	d.copies.Store(int32(normalizeUDPCopies(copies)))
 	d.generation.Add(1)
 	d.mu.Lock()
 	d.pending = nil
 	d.mu.Unlock()
-	d.originals.Store(int32(normalizeUDPCopies(originals)))
-	d.copies.Store(int32(normalizeUDPCopies(copies)))
 }
 
 func (d *udpDuplicator[A]) offer(original []byte, address A) {
