@@ -8,6 +8,7 @@ package main
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -286,6 +287,17 @@ func (t *wfpTable) SelectedProcs() []ProcInfo {
 		}
 	}
 	return out
+}
+
+// ProcName returns the lower-case executable name of pid, or "pid N" when the
+// live process tree does not know it.
+func (t *wfpTable) ProcName(pid uint32) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if p, ok := t.procs[pid]; ok && p.name != "" {
+		return p.name
+	}
+	return "pid " + strconv.FormatUint(uint64(pid), 10)
 }
 
 // resolveClass is the precedence rule between the three ways of deciding what

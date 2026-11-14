@@ -209,6 +209,7 @@ type Engine struct {
 	noDNS                                      atomic.Bool
 	wfpOn                                      atomic.Bool // WFP mode: only the selected apps are tunnelled
 	wfp                                        *wfpMonitor // nil when the SOCKET layer could not be opened
+	access                                     accessLog   // remotes per program, reported every 30 s
 	cCaptured, cInjected, cInNoNAT, cInjectErr atomic.Uint64
 	cSegmented, cICMPErr, cDNSQ, cDNSA         atomic.Uint64
 	cV6Block                                   atomic.Uint64
@@ -562,6 +563,11 @@ func (e *Engine) capture(pkt []byte, addr *divertAddress) bool {
 			}
 		}
 	}
+	if e.wfp != nil {
+		if pid, ok := e.wfp.table.Owner(p.proto, p.srcPort, time.Now()); ok {
+			e.access.add(e.wfp.table.ProcName(pid), netip.AddrPortFrom(p.dst, p.dstPort))
+		}
+	}
 	class, full := e.classify(p.proto, p.srcPort)
 	if class == classNone && !full {
 		return false
@@ -839,6 +845,9 @@ func (e *Engine) housekeeping() {
 				}
 			}
 			e.natMu.Unlock()
+			for _, line := range e.access.take() {
+				e.logDisk("[acesso] %s", line)
+			}
 		}
 	}
 }
