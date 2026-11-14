@@ -196,6 +196,7 @@ type pingState struct {
 	target  netip.Addr
 	last    time.Duration
 	ok      bool
+	seen    bool // a reply arrived once; earlier timeouts are startup noise, not loss
 	err     uint32
 	history []bool
 }
@@ -221,6 +222,9 @@ func (s *pingState) record(ok bool, rtt time.Duration) {
 	s.ok = ok
 	if ok {
 		s.last = rtt
+		s.seen = true
+	} else if !s.seen {
+		return
 	}
 	s.history = append(s.history, ok)
 	if len(s.history) > 20 {

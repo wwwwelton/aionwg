@@ -285,3 +285,18 @@ func TestUDPNetworkLossResilienceAndAntiStutter(t *testing.T) {
 	pps := float64(burstCount) / elapsed.Seconds()
 	t.Logf("High-rate UDP burst (200 packets, 200 KB in %v): %.1f Mbit/s, %.0f packets/sec (0 socket errors)", elapsed, mbps, pps)
 }
+
+func TestPingLossIgnoresTimeoutsBeforeFirstReply(t *testing.T) {
+	st := &pingState{target: netip.MustParseAddr("203.0.113.1")}
+	for range 3 {
+		st.record(false, 0)
+	}
+	if got := st.result().Loss; got != 0 {
+		t.Fatalf("startup timeouts counted as loss: %v", got)
+	}
+	st.record(true, 20*time.Millisecond)
+	st.record(false, 0)
+	if got := st.result().Loss; got != 0.5 {
+		t.Fatalf("loss after first reply = %v, want 0.5", got)
+	}
+}
