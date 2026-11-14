@@ -40,8 +40,12 @@ func (m model) endpointPicker(w int) string {
 		}
 		tag := ""
 		if r.current {
-			tag = sDim.Render("  [em uso]")
+			tag = "  [em uso]"
 		}
+		if r.path != "" {
+			tag += "  [" + r.path + "]"
+		}
+		tag = sDim.Render(tag)
 		line := fmt.Sprintf("%-22s %-26s %s", r.ep.String(), r.label, ping) + tag
 		if i == cur {
 			lines = append(lines, sSel.Render("▸ ")+sSel.Render(line))
@@ -54,6 +58,14 @@ func (m model) endpointPicker(w int) string {
 		lines = append(lines, sSel.Render("▸ "+other))
 	} else {
 		lines = append(lines, "  "+sDim.Render(other))
+	}
+	if m.eng != nil {
+		if cands := m.eng.endpointCandidates(rows); len(cands) > 0 {
+			lines = append(lines, "", sDim.Render(fmt.Sprintf("sendo buscados (%d, ainda sem handshake):", len(cands))))
+			for _, ep := range cands {
+				lines = append(lines, sDim.Render("    "+ep.String()))
+			}
+		}
 	}
 	title := fmt.Sprintf("Endpoints — %d conhecido(s)  [↑↓] mover  [Enter] trocar  [Esc] fechar", len(rows))
 	if len(rows) == 0 {

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"net/netip"
 	"sort"
 	"strings"
@@ -37,12 +38,13 @@ func coloLabel(colo string) string {
 }
 
 // endpointRow is one entry of the endpoint picker. rtt is zero when the
-// endpoint has not been measured yet.
+// endpoint has not been measured yet; path names the extra connection using it.
 type endpointRow struct {
 	ep      netip.AddrPort
 	label   string
 	rtt     time.Duration
 	current bool
+	path    string
 }
 
 // endpointStats keeps what the picker shows per endpoint. It is package level
@@ -76,17 +78,34 @@ func noteEndpointRTT(ep netip.AddrPort, rtt time.Duration) {
 	endpointStats.rtt[ep] = rtt
 }
 
-// endpointRows lists the endpoints proven by a handshake, current one included,
-// sorted by address.
+// endpointRows lists the endpoints proven by a handshake, the current one and
+// the endpoints of the extra connections, sorted by address.
 func (e *Engine) endpointRows() []endpointRow {
 	cur := e.eps()[0]
 	seen := map[netip.AddrPort]bool{cur: true}
 	eps := []netip.AddrPort{cur}
-	for _, ep := range e.learnedList() {
+	add := func(ep netip.AddrPort) {
 		if !seen[ep] {
 			seen[ep] = true
 			eps = append(eps, ep)
 		}
+	}
+	for _, ep := range e.learnedList() {
+		add(ep)
+	}
+	paths := map[netip.AddrPort]string{}
+	now := time.Now()
+	for i, p := range e.paths {
+		if p == nil {
+			continue
+		}
+		ep := p.currentEndpoint()
+		state := "sem resposta"
+		if p.active(now) {
+			state = "ativo " + time.Duration(p.rtt.Load()).Round(time.Millisecond).String()
+		}
+		paths[ep] = fmt.Sprintf("caminho %d · %s", i+2, state)
+		add(ep)
 	}
 	sort.Slice(eps, func(i, j int) bool { return eps[i].String() < eps[j].String() })
 
@@ -98,7 +117,24 @@ func (e *Engine) endpointRows() []endpointRow {
 		if colo, ok := endpointStats.colo[ep]; ok {
 			label = coloLabel(colo)
 		}
-		rows = append(rows, endpointRow{ep: ep, label: label, rtt: endpointStats.rtt[ep], current: ep == cur})
+		rows = append(rows, endpointRow{ep: ep, label: label, rtt: endpointStats.rtt[ep], current: ep == cur, path: paths[ep]})
 	}
 	return rows
+}
+
+// endpointCandidates lists the WARP endpoints the path search is still trying
+// that are not in rows yet, sorted by address.
+func (e *Engine) endpointCandidates(rows []endpointRow) []netip.AddrPort {
+	have := make(map[netip.AddrPort]bool, len(rows))
+	for _, r := range rows {
+		have[r.ep] = true
+	}
+	var out []netip.AddrPort
+	for _, ep := range pathPool(e.eps()[0], e.learnedList()) {
+		if !have[ep] {
+			out = append(out, ep)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
+	return out
 }
