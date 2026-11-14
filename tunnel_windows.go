@@ -179,6 +179,7 @@ type Engine struct {
 	meterMu      sync.Mutex
 	meter        *meterAdapter // Wintun copy for Npcap-based DPS meters
 	meterErr     string
+	meterDup     meterDedup // one copy of each inbound reply to the meter; the game gets all
 	meterOpening bool                          // protected by meterMu; never initialize Wintun on the TUI goroutine
 	meterOpener  func() (*meterAdapter, error) // injectable for regression tests
 	addr4        netip.Addr
@@ -743,7 +744,7 @@ func (e *Engine) processInbound(pkt []byte) {
 		clampMSS(out, &p, e.maxMSS4)
 	}
 	fixChecksums(out, &p)
-	if game && e.mirror.enabled.Load() {
+	if game && e.mirror.enabled.Load() && !e.meterDup.seen(out, &p, time.Now()) {
 		e.meterWrite(out)
 	}
 	if e.injectInbound(out, p.v6, ifIdx, subIfIdx) {
@@ -805,7 +806,7 @@ func (e *Engine) housekeeping() {
 			mt := e.meter
 			e.meterMu.Unlock()
 			if avg, mx, n := mt.takeLatency(); n > 0 {
-				e.logDisk("[meter-lat] escritas=%d no adaptador: media=%v max=%v", n, avg.Round(time.Microsecond), mx.Round(time.Microsecond))
+				e.logDisk("[meter-lat] escritas=%d no adaptador: media=%v max=%v respostas-duplicadas-ocultas=%d", n, avg.Round(time.Microsecond), mx.Round(time.Microsecond), e.meterDup.droppedCount())
 			}
 			prev = cur
 		case <-tk.C:
