@@ -25,6 +25,11 @@ Teclas
   [w]      liga/desliga o modo WFP (só os apps marcados passam pelo túnel)
   [l]      lista de programas abertos para marcar no modo WFP
   [n]      liga/desliga o DNS pelo túnel (modo sistema inteiro)
+  [b]      liga/desliga "melhor endpoint": ao conectar, mede por ICMP e usa o IP de
+           menor latência entre o da config, os IPs do nome do endpoint e os de
+           "endpoint_candidates" em settings.json (lista sua, vazia por padrão).
+           Confirma o handshake; se falhar, volta ao endpoint da config. Vale na
+           próxima conexão. Nenhum IP vem embutido no programa.
   [m]      liga/desliga o espelho para DPS meter
   [x]      autoteste: DNS, IP de saída, Steam, download e upload pelo túnel
   [g]      painel de diagnóstico (contadores)

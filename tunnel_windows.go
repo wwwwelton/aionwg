@@ -18,7 +18,9 @@ package main
 
 import (
 	"bufio"
+	"encoding/hex"
 	"fmt"
+	"net"
 	"net/netip"
 	"sort"
 	"strconv"
@@ -57,21 +59,23 @@ func natKey(proto uint8, v6 bool, port uint16) portKey {
 
 // EngineOptions are the user settings the engine needs.
 type EngineOptions struct {
-	Processes    []string
-	PingTarget   string
-	Mirror       bool
-	UDPDuplicate bool // send game UDP extra copies via Windows direct route
-	UDPOriginals int  // A of A:B ratio
-	UDPCopies    int  // B of A:B ratio
-	UDPForce     bool // also copy game UDP outside AllowedIPs; never DNS/LAN/full tunnel
-	UDPNewestOut bool // opt-in latest-first ordering of primary game UDP sends
-	UDPNewestIn  bool // opt-in latest-first ordering of primary game UDP arrivals
-	FullTunnel   bool
-	NoDNS        bool     // full tunnel: do NOT redirect DNS into the tunnel
-	WFP          bool     // tunnel only WFPApps; replaces the port and full-tunnel modes
-	WFPApps      []string // executables the user picked for WFP mode
-	ConfigPath   string   // imported profile receiving learned WFP destinations
-	ConfigPaths  []string
+	Processes          []string
+	PingTarget         string
+	Mirror             bool
+	UDPDuplicate       bool // send game UDP extra copies via Windows direct route
+	UDPOriginals       int  // A of A:B ratio
+	UDPCopies          int  // B of A:B ratio
+	UDPForce           bool // also copy game UDP outside AllowedIPs; never DNS/LAN/full tunnel
+	UDPNewestOut       bool // opt-in latest-first ordering of primary game UDP sends
+	UDPNewestIn        bool // opt-in latest-first ordering of primary game UDP arrivals
+	FullTunnel         bool
+	NoDNS              bool     // full tunnel: do NOT redirect DNS into the tunnel
+	WFP                bool     // tunnel only WFPApps; replaces the port and full-tunnel modes
+	WFPApps            []string // executables the user picked for WFP mode
+	ConfigPath         string   // imported profile receiving learned WFP destinations
+	ConfigPaths        []string
+	BestEndpoint       bool     // at connect, use the lowest-latency endpoint (see bestendpoint.go)
+	EndpointCandidates []string // extra IPs/host names tried by BestEndpoint
 }
 
 // Diag are counters for the diagnostics panel.
@@ -259,11 +263,30 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 	e.maxMSS4 = uint16(conf.MTU - 40)
 	e.maxMSS6 = uint16(conf.MTU - 60)
 
+	var origEPs []netip.AddrPort
 	for _, p := range conf.Peers {
 		ep, err := ResolveEndpoint(p.Endpoint)
 		if err != nil {
 			return nil, err
 		}
+		ep0 := ep
+		if opt.BestEndpoint && ep.Addr().Is4() {
+			host, _, _ := net.SplitHostPort(p.Endpoint)
+			cands := endpointCandidates(ep, host, opt.EndpointCandidates, lookupIPv4)
+			if len(cands) > 1 {
+				best, curRTT, bestRTT := bestEndpoint(ep, cands, icmpMedian)
+				switch {
+				case best != ep:
+					logf("rota: endpoint %s (%v) trocado por %s (%v)", ep.Addr(), curRTT, best.Addr(), bestRTT)
+				case curRTT > 0:
+					logf("rota: endpoint %s já é o mais rápido (%v, %d testados)", ep.Addr(), curRTT, len(cands))
+				default:
+					logf("rota: endpoint %s não responde a ICMP; mantido", ep.Addr())
+				}
+				ep = best
+			}
+		}
+		origEPs = append(origEPs, ep0)
 		e.endpoints = append(e.endpoints, ep)
 	}
 	e.pings[0].target = e.endpoints[0].Addr()
@@ -328,6 +351,7 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 		e.Close()
 		return nil, err
 	}
+	e.verifyEndpoints(origEPs)
 	if uapi, err := e.dev.IpcGet(); err == nil {
 		for _, l := range strings.Split(uapi, "\n") {
 			if v, ok := strings.CutPrefix(l, "listen_port="); ok {
@@ -1189,4 +1213,58 @@ func (p *icmpPinger) ping(dst netip.Addr, timeout time.Duration) (time.Duration,
 		d = 500 * time.Microsecond
 	}
 	return d, 0
+}
+
+// icmpMedian is the median of 5 echo replies; it fails with fewer than 3.
+func icmpMedian(a netip.Addr) (time.Duration, bool) {
+	p, err := newIcmpPinger()
+	if err != nil {
+		return 0, false
+	}
+	defer p.close()
+	var rtts []time.Duration
+	for range 5 {
+		if rtt, code := p.ping(a, 800*time.Millisecond); code == 0 {
+			rtts = append(rtts, rtt)
+		}
+	}
+	if len(rtts) < 3 {
+		return 0, false
+	}
+	sort.Slice(rtts, func(i, j int) bool { return rtts[i] < rtts[j] })
+	return rtts[len(rtts)/2], true
+}
+
+// verifyEndpoints puts back any endpoint chosen by bestEndpoint that does not
+// complete a handshake: ICMP can answer where WireGuard does not.
+func (e *Engine) verifyEndpoints(orig []netip.AddrPort) {
+	pending := map[int]bool{}
+	for i := range orig {
+		if e.endpoints[i] != orig[i] {
+			pending[i] = true
+		}
+	}
+	for deadline := time.Now().Add(6 * time.Second); len(pending) > 0 && time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		ipc, _ := e.dev.IpcGet()
+		done := handshakenPeers(ipc)
+		for i := range pending {
+			if done[hex.EncodeToString(e.conf.Peers[i].PublicKey)] {
+				delete(pending, i)
+			}
+		}
+	}
+	for i := range pending {
+		upd := fmt.Sprintf("public_key=%s\nupdate_only=true\nendpoint=%s\n", hex.EncodeToString(e.conf.Peers[i].PublicKey), orig[i])
+		if err := e.dev.IpcSet(upd); err != nil {
+			e.logf("rota: %s sem handshake e não foi possível voltar para %s: %v", e.endpoints[i].Addr(), orig[i].Addr(), err)
+			continue
+		}
+		e.logf("rota: %s não completou o handshake; voltou para %s", e.endpoints[i].Addr(), orig[i].Addr())
+		e.endpoints[i] = orig[i]
+		if i == 0 {
+			e.pingMu.Lock()
+			e.pings[0].target = orig[0].Addr()
+			e.pingMu.Unlock()
+		}
+	}
 }
