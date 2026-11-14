@@ -266,14 +266,14 @@ func clampMSS(b []byte, p *pktInfo, maxMSS uint16) bool {
 	return false
 }
 
-// buildICMPEcho builds an ICMP/ICMPv6 echo request.
-func buildICMPEcho(src, dst netip.Addr, id, seq uint16) []byte {
+// buildICMPEchoTTL builds an ICMP/ICMPv6 echo request with the given TTL (hop limit).
+func buildICMPEchoTTL(src, dst netip.Addr, id, seq uint16, ttl uint8) []byte {
 	payload := []byte("aionwg-ping-0123456789abcdef")
 	if dst.Is4() {
 		b := make([]byte, 20+8+len(payload))
 		b[0] = 0x45
 		binary.BigEndian.PutUint16(b[2:], uint16(len(b)))
-		b[8] = 64
+		b[8] = ttl
 		b[9] = protoICMP
 		s, d := src.As4(), dst.As4()
 		copy(b[12:], s[:])
@@ -290,7 +290,7 @@ func buildICMPEcho(src, dst netip.Addr, id, seq uint16) []byte {
 	b[0] = 0x60
 	binary.BigEndian.PutUint16(b[4:], uint16(8+len(payload)))
 	b[6] = protoICMPv6
-	b[7] = 64
+	b[7] = ttl
 	s, d := src.As16(), dst.As16()
 	copy(b[8:], s[:])
 	copy(b[24:], d[:])
@@ -301,6 +301,11 @@ func buildICMPEcho(src, dst netip.Addr, id, seq uint16) []byte {
 	p, _ := parsePacket(b)
 	fixChecksums(b, &p)
 	return b
+}
+
+// buildICMPEcho builds an ICMP/ICMPv6 echo request with the default TTL.
+func buildICMPEcho(src, dst netip.Addr, id, seq uint16) []byte {
+	return buildICMPEchoTTL(src, dst, id, seq, 64)
 }
 
 // parseICMPEchoReply returns id/seq if b is an echo reply.

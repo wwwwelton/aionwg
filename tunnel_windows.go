@@ -136,6 +136,9 @@ type Stats struct {
 	Diag             Diag
 	Endpoint         string
 	TunnelAddr       string
+	Route            RouteTrace // latest traceroute of the route in use
+	RouteMonitor     bool       // best-endpoint option active for this connection
+	RouteNote        string     // last route monitor / endpoint switch message
 }
 
 type outboundUDPJob struct {
@@ -191,14 +194,22 @@ type Engine struct {
 	wg      sync.WaitGroup
 	stop    chan struct{}
 
-	pingMu   sync.Mutex
-	pingSeq  uint16
-	pending  map[uint32]time.Time // id<<16|seq -> sent
-	pings    map[uint16]*pingState
-	gwTarget netip.Addr
-	profile  string // profile file name: key of the persisted routes
-	lrMu     sync.Mutex
-	learned  map[netip.AddrPort]bool // endpoints proven by a handshake (route monitor)
+	pingMu    sync.Mutex
+	pingSeq   uint16
+	pending   map[uint32]time.Time // id<<16|seq -> sent
+	pings     map[uint16]*pingState
+	gwTarget  netip.Addr
+	profile   string // profile file name: key of the persisted routes
+	lrMu      sync.Mutex
+	learned   map[netip.AddrPort]bool // endpoints proven by a handshake (route monitor)
+	routeMon  bool
+	routeNote atomic.Pointer[string]
+	trace     atomic.Pointer[RouteTrace]
+	traceKick chan struct{}
+	traceMu   sync.Mutex
+	traceRun  uint8
+	traceSent map[uint16]time.Time
+	traceGot  map[uint16]traceAnswer
 }
 
 type pingState struct {
@@ -249,15 +260,20 @@ func (s *pingState) record(ok bool, rtt time.Duration) {
 const (
 	pingIDGateway = 0xA102
 	pingIDGame    = 0xA103
+	pingIDTrace   = 0xA104
 )
 
 func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*Engine, error) {
 	e := &Engine{
-		conf:    conf,
-		logf:    logf,
-		nat:     map[portKey]*natEntry{},
-		stop:    make(chan struct{}),
-		pending: map[uint32]time.Time{},
+		conf:      conf,
+		logf:      logf,
+		traceKick: make(chan struct{}, 1),
+		traceSent: map[uint16]time.Time{},
+		traceGot:  map[uint16]traceAnswer{},
+		routeMon:  opt.BestEndpoint,
+		nat:       map[portKey]*natEntry{},
+		stop:      make(chan struct{}),
+		pending:   map[uint32]time.Time{},
 		pings: map[uint16]*pingState{
 			pingIDGateway: {},
 			pingIDGame:    {},
@@ -375,6 +391,7 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 	}
 	go e.housekeeping()
 	go e.pingLoop()
+	go e.traceLoop()
 	if opt.BestEndpoint {
 		go e.routeLoop()
 	}
@@ -633,6 +650,10 @@ func (e *Engine) processInbound(pkt []byte) {
 		return
 	}
 	if p.proto == protoICMP || p.proto == protoICMPv6 {
+		if from, seq, ok := parseTraceReply(pkt, &p, pingIDTrace); ok {
+			e.traceHit(from, seq)
+			return
+		}
 		if id, seq, ok := parseICMPEchoReply(pkt, &p); ok {
 			e.pingReply(id, seq)
 			return
@@ -872,6 +893,13 @@ func (e *Engine) Stats() Stats {
 		FullTunnel: e.full.Load(),
 		Procs:      e.owner.Processes(),
 		Endpoint:   e.eps()[0].String(),
+	}
+	if rt := e.trace.Load(); rt != nil {
+		s.Route = *rt
+	}
+	s.RouteMonitor = e.routeMon
+	if n := e.routeNote.Load(); n != nil {
+		s.RouteNote = *n
 	}
 	var addrs []string
 	for _, a := range e.conf.Addresses {
@@ -1183,14 +1211,16 @@ func (e *Engine) SetEndpoint(ep netip.AddrPort) error {
 		ok = handshakenPeers(ipc)[key]
 	}
 	if ok {
-		e.logf("rota: endpoint trocado %s -> %s (handshake ok; o perfil não foi alterado)", prev[0], ep)
+		e.routeLog("rota: endpoint trocado %s -> %s (handshake ok; o perfil não foi alterado)", prev[0], ep)
 		e.learn(ep)
+		e.kickTrace()
 		return nil
 	}
 	if err := apply(prev[0]); err != nil {
 		return fmt.Errorf("sem handshake em %s e não foi possível voltar para %s: %w", ep, prev[0], err)
 	}
-	e.logf("rota: %s não completou o handshake em %v; voltou para %s", ep, endpointSwitchWait, prev[0])
+	e.routeLog("rota: %s não completou o handshake em %v; voltou para %s", ep, endpointSwitchWait, prev[0])
+	e.kickTrace()
 	return fmt.Errorf("sem handshake em %s", ep)
 }
 
@@ -1442,7 +1472,7 @@ func (e *Engine) routeLoop() {
 			continue
 		}
 		before := e.gamePing()
-		e.logf("rota: testando %s (perna direta %v contra %v; ping do jogo atual %v)", alt, legs[alt], curLeg, before)
+		e.routeLog("rota: testando %s (perna direta %v contra %v; ping do jogo atual %v)", alt, legs[alt], curLeg, before)
 		if err := e.SetEndpoint(alt); err != nil {
 			next = time.Now().Add(failCooldown)
 			continue
@@ -1457,12 +1487,185 @@ func (e *Engine) routeLoop() {
 		}
 		after := e.gamePing()
 		if keepRoute(before, after) {
-			e.logf("rota: mantida %s — ping do jogo %v -> %v", alt, before, after)
+			e.routeLog("rota: mantida %s — ping do jogo %v -> %v", alt, before, after)
 			next = time.Now().Add(routeCooldown)
 			continue
 		}
-		e.logf("rota: ping do jogo não melhorou (%v -> %v); voltando para %s", before, after, cur)
+		e.routeLog("rota: ping do jogo não melhorou (%v -> %v); voltando para %s", before, after, cur)
 		_ = e.SetEndpoint(cur)
 		next = time.Now().Add(failCooldown)
+	}
+}
+
+// routeLog logs a route message and keeps it as the note shown on screen.
+func (e *Engine) routeLog(format string, args ...any) {
+	s := fmt.Sprintf(format, args...)
+	e.routeNote.Store(&s)
+	e.logf("%s", s)
+}
+
+// ---------------------------------------------------------------- traceroute
+
+type traceAnswer struct {
+	addr netip.Addr
+	at   time.Time
+}
+
+func (e *Engine) kickTrace() {
+	select {
+	case e.traceKick <- struct{}{}:
+	default:
+	}
+}
+
+// traceHit records an answer to a tunnel probe of the current run.
+func (e *Engine) traceHit(from netip.Addr, seq uint16) {
+	e.traceMu.Lock()
+	defer e.traceMu.Unlock()
+	if run, _ := traceUnseq(seq); run != e.traceRun || e.traceGot == nil {
+		return
+	}
+	if _, dup := e.traceGot[seq]; !dup {
+		e.traceGot[seq] = traceAnswer{from, time.Now()}
+	}
+}
+
+// traceTunnel sends TTL-limited echoes through the tunnel and collects who
+// answered; hops that stay silent are left empty.
+func (e *Engine) traceTunnel(dst netip.Addr) []Hop {
+	src, ok := e.tunAddr(dst.Is6())
+	if !ok {
+		return nil
+	}
+	e.traceMu.Lock()
+	e.traceRun++
+	run := e.traceRun
+	e.traceSent = map[uint16]time.Time{}
+	e.traceGot = map[uint16]traceAnswer{}
+	e.traceMu.Unlock()
+	for ttl := 1; ttl <= maxTraceHops; ttl++ {
+		seq := traceSeq(run, ttl)
+		e.traceMu.Lock()
+		e.traceSent[seq] = time.Now()
+		e.traceMu.Unlock()
+		e.tun.inject(buildICMPEchoTTL(src, dst, pingIDTrace, seq, uint8(ttl)))
+	}
+	for deadline := time.Now().Add(1500 * time.Millisecond); time.Now().Before(deadline); time.Sleep(25 * time.Millisecond) {
+		e.traceMu.Lock()
+		reached := false
+		for _, a := range e.traceGot {
+			reached = reached || a.addr == dst
+		}
+		e.traceMu.Unlock()
+		if reached {
+			time.Sleep(150 * time.Millisecond) // nearer hops can arrive just after
+			break
+		}
+	}
+	e.traceMu.Lock()
+	defer e.traceMu.Unlock()
+	hops := make([]Hop, 0, maxTraceHops)
+	for ttl := 1; ttl <= maxTraceHops; ttl++ {
+		seq := traceSeq(run, ttl)
+		h := Hop{TTL: ttl}
+		if a, ok := e.traceGot[seq]; ok {
+			h.Addr, h.RTT = a.addr, a.at.Sub(e.traceSent[seq])
+		}
+		hops = append(hops, h)
+	}
+	return trimHops(hops, dst)
+}
+
+// traceDirect probes the path from this PC to dst outside the tunnel, one
+// TTL per goroutine so the whole trace takes about one timeout.
+func (e *Engine) traceDirect(dst netip.Addr) []Hop {
+	if !dst.Is4() {
+		return nil
+	}
+	hops := make([]Hop, maxTraceHops)
+	var wg sync.WaitGroup
+	for i := range hops {
+		hops[i] = Hop{TTL: i + 1}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p, err := newIcmpPinger()
+			if err != nil {
+				return
+			}
+			defer p.close()
+			if from, rtt, ok := p.pingTTL(dst, uint8(i+1), 900*time.Millisecond); ok {
+				hops[i].Addr, hops[i].RTT = from, rtt
+			}
+		}()
+	}
+	wg.Wait()
+	return trimHops(hops, dst)
+}
+
+// pingTTL sends one echo with a limited TTL and returns who answered: a router
+// (TTL expired in transit) or the destination.
+func (p *icmpPinger) pingTTL(dst netip.Addr, ttl uint8, timeout time.Duration) (from netip.Addr, rtt time.Duration, ok bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a := dst.As4()
+	ip := *(*uint32)(unsafe.Pointer(&a[0]))
+	opt := struct { // IP_OPTION_INFORMATION
+		Ttl, Tos, Flags, OptionsSize uint8
+		_                            [4]byte
+		OptionsData                  uintptr
+	}{Ttl: ttl}
+	data := []byte("aionwg")
+	reply := make([]byte, 40+len(data)+8+64)
+	r, _, _ := procIcmpSendEcho.Call(p.h, uintptr(ip), uintptr(unsafe.Pointer(&data[0])), uintptr(len(data)),
+		uintptr(unsafe.Pointer(&opt)), uintptr(unsafe.Pointer(&reply[0])), uintptr(len(reply)), uintptr(timeout.Milliseconds()))
+	if r == 0 {
+		return
+	}
+	const ipTTLExpiredTransit = 11013
+	if status := *(*uint32)(unsafe.Pointer(&reply[4])); status != 0 && status != ipTTLExpiredTransit {
+		return
+	}
+	rtt = time.Duration(*(*uint32)(unsafe.Pointer(&reply[8]))) * time.Millisecond
+	if rtt == 0 {
+		rtt = 500 * time.Microsecond
+	}
+	return netip.AddrFrom4([4]byte(reply[0:4])), rtt, true
+}
+
+// runTrace measures both segments of the route in use and publishes them.
+func (e *Engine) runTrace() {
+	ep := e.eps()[0].Addr()
+	rt := RouteTrace{At: time.Now(), Endpoint: ep, Direct: e.traceDirect(ep)}
+	rt.Dest = e.gameServer()
+	rt.DestIsGame = rt.Dest.IsValid()
+	if !rt.Dest.IsValid() {
+		rt.Dest = e.gwTarget
+	}
+	if rt.Dest.IsValid() {
+		rt.Tunnel = e.traceTunnel(rt.Dest)
+	}
+	e.trace.Store(&rt)
+}
+
+// traceLoop refreshes the route view shortly after connecting, every 45 s and
+// whenever the endpoint changes.
+func (e *Engine) traceLoop() {
+	tk := time.NewTicker(45 * time.Second)
+	defer tk.Stop()
+	first := time.After(4 * time.Second)
+	for {
+		select {
+		case <-e.stop:
+			return
+		case <-first:
+			first = nil // a nil channel never fires again
+		case <-tk.C:
+		case <-e.traceKick:
+		}
+		if e.closing.Load() {
+			return
+		}
+		e.runTrace()
 	}
 }
