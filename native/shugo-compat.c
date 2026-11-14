@@ -16,6 +16,11 @@ static ULONGLONG refreshed;
 static uint32_t games[32], mirrors[32];
 static size_t game_count, mirror_count;
 
+static int is_engine_name(const WCHAR *name) {
+    size_t len = wcslen(name);
+    return len > 10 && !_wcsnicmp(name, L"AionWG", 6) && !_wcsicmp(name + len - 4, L".exe");
+}
+
 static void refresh_processes(void) {
     ULONGLONG now = GetTickCount64();
     if (refreshed && now - refreshed < 1000) return;
@@ -28,7 +33,7 @@ static void refresh_processes(void) {
         if (!_wcsicmp(entry.szExeFile, L"AION2.exe")) {
             if (game_count == 32) { game_count = mirror_count = 0; break; }
             games[game_count++] = entry.th32ProcessID;
-        } else if (!_wcsicmp(entry.szExeFile, L"AionWG.exe")) {
+        } else if (is_engine_name(entry.szExeFile)) {
             if (mirror_count == 32) { game_count = mirror_count = 0; break; }
             mirrors[mirror_count++] = entry.th32ProcessID;
         }
