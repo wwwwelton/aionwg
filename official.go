@@ -10,55 +10,23 @@ import (
 	"strings"
 )
 
-// AION 2 / NCSOFT (AS142005 via ipverse/asn-ip + bgp.he.net, plus servers
-// seen in use) and Valve/Steam (AS32590).
-var ncsoftRanges = []string{
-	"193.202.112.0/24", // servidor do AION 2 informado pelo usuário (193.202.112.161)
-	"210.61.114.0/24",  // NCSOFT, faltavam na lista ipverse (bgp.he.net)
-	"210.242.83.0/24",
-	"210.242.123.0/24",
-	"210.242.186.0/24",
-	"64.25.32.0/21",
-	"64.25.41.0/24",
-	"85.113.86.0/23",
-	"103.164.130.0/23",
-	"193.149.158.0/23",
-	"193.149.166.0/23",
-	"206.127.144.0/22",
-	"206.127.148.0/23",
-	"206.127.152.0/22",
-	"206.127.156.0/23",
-	"209.35.96.0/23",
-	"209.35.114.0/23",
-	"209.35.156.0/23",
-	"209.35.188.0/23",
-	"210.61.3.0/24",
-	"210.61.107.0/24",
-	"210.242.118.0/24",
-	"216.107.240.0/20",
-}
-
-var valveRanges = []string{
-	"45.121.184.0/24",
-	"103.10.124.0/23",
-	"103.28.54.0/24",
-	"146.66.152.0/24",
-	"146.66.155.0/24",
-	"155.133.224.0/21",
-	"155.133.236.0/22",
-	"155.133.240.0/23",
-	"155.133.244.0/24",
-	"155.133.246.0/24",
-	"155.133.248.0/22",
-	"155.133.252.0/24",
-	"155.133.254.0/23",
-	"162.254.192.0/21",
-	"185.25.180.0/24",
-	"185.25.182.0/23",
-	"192.69.96.0/22",
-	"205.196.6.0/24",
-	"208.64.200.0/22",
-	"208.78.164.0/22",
+// GameAllowed keeps the tunnel subnet plus only the WFP app server addresses
+// AionWG actually saw, as /32 each.
+func GameAllowed(c *WGConf, observed []netip.Addr, endpoints []netip.Addr) []netip.Prefix {
+	out := tunnelSubnets(c)
+	for _, a := range observed {
+		if !a.Is4() || c.Bypass(a) {
+			continue
+		}
+		out = append(out, netip.PrefixFrom(a, 32))
+	}
+	var ex []netip.Prefix
+	for _, e := range endpoints {
+		if e.Is4() {
+			ex = append(ex, netip.PrefixFrom(e, 32))
+		}
+	}
+	return mergeSorted(excludePrefixes(out, ex))
 }
 
 // excludePrefixes returns base minus ex, as a minimal list of prefixes.
@@ -136,27 +104,6 @@ func FullTunnelAllowed(c *WGConf, endpoints []netip.Addr) []netip.Prefix {
 	// address on the tunnel Windows fails IPv6 at once and apps use IPv4.
 	out = append(out, netip.MustParsePrefix("::/0"))
 	return mergeSorted(append(out, tunnelSubnets(c)...))
-}
-
-// GameAllowed is NCSOFT + Valve ranges, the tunnel subnet and any game/Steam
-// server addresses AionWG actually saw (as /24).
-func GameAllowed(c *WGConf, observed []netip.Addr, endpoints []netip.Addr) []netip.Prefix {
-	out := mustPrefixes(ncsoftRanges)
-	out = append(out, mustPrefixes(valveRanges)...)
-	out = append(out, tunnelSubnets(c)...)
-	for _, a := range observed {
-		if !a.Is4() || c.Bypass(a) {
-			continue
-		}
-		out = append(out, netip.PrefixFrom(a, 24).Masked())
-	}
-	var ex []netip.Prefix
-	for _, e := range endpoints {
-		if e.Is4() {
-			ex = append(ex, netip.PrefixFrom(e, 32))
-		}
-	}
-	return mergeSorted(excludePrefixes(out, ex))
 }
 
 // mergeSorted drops duplicates and prefixes contained in others.

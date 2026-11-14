@@ -92,16 +92,25 @@ func TestGenerateOfficial(t *testing.T) {
 	}
 }
 
-func TestGameAllowedHasAionServer(t *testing.T) {
+func TestGameAllowedOnlyObservedServers(t *testing.T) {
 	c, _ := ParseConfig(sampleConf)
-	al := GameAllowed(c, nil, nil)
-	a := netip.MustParseAddr("193.202.112.161")
-	for _, p := range al {
+	seen := netip.MustParseAddr("193.202.112.161")
+	al := GameAllowed(c, []netip.Addr{seen}, nil)
+	if !containsAddr(al, seen) {
+		t.Fatal("observed WFP server not in AllowedIPs")
+	}
+	if containsAddr(al, netip.MustParseAddr("193.202.112.9")) {
+		t.Fatal("unobserved address inside the NCSOFT range leaked into AllowedIPs")
+	}
+}
+
+func containsAddr(ps []netip.Prefix, a netip.Addr) bool {
+	for _, p := range ps {
 		if p.Contains(a) {
-			return
+			return true
 		}
 	}
-	t.Fatal("AION 2 server not covered")
+	return false
 }
 
 func TestUserFixedConfig(t *testing.T) {
