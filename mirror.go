@@ -11,6 +11,7 @@ package main
 //     client 127.0.0.1:<game local port>  ⇄  server 127.0.0.1:<game server port>
 //
 // Ports are copied from the real connection whenever they are free.
+// Shugo's relay (shugo-compat.dll) reads this loopback pair, so it must stay.
 
 import (
 	"encoding/binary"
@@ -24,10 +25,19 @@ import (
 const (
 	dirC2S = 0 // client → server (game → server)
 	dirS2C = 1 // server → client
+
+	mirrorChanCap   = 8192
+	mirrorIdle      = 3 * time.Minute
+	mirrorJanitorEv = 15 * time.Second
+	mirrorEndGrace  = time.Second // let the writers flush before the flow is dropped
+	maxPending      = 4 << 20
 )
 
 // mirrorPeerRead is a test hook: receives what arrives on the far side.
 var mirrorPeerRead func(dir int, b []byte)
+
+// mirrorEndSpawns counts end-of-flow goroutines (tests assert one per flow).
+var mirrorEndSpawns atomic.Int32
 
 func seqLess(a, b uint32) bool { return int32(a-b) < 0 }
 
@@ -38,8 +48,6 @@ type reasm struct {
 	pending   map[uint32][]byte
 	pendBytes int
 }
-
-const maxPending = 4 << 20
 
 func (r *reasm) syn(seq uint32) {
 	r.init, r.next = true, seq+1
@@ -67,7 +75,11 @@ func (r *reasm) push(seq uint32, data []byte, emit func([]byte)) {
 		r.drain(emit)
 		return
 	}
-	// future segment: hold it until the gap is filled
+	r.hold(seq, data, emit)
+}
+
+// hold keeps a future segment until the gap before it is filled.
+func (r *reasm) hold(seq uint32, data []byte, emit func([]byte)) {
 	if r.pending == nil {
 		r.pending = map[uint32][]byte{}
 	}
@@ -77,17 +89,19 @@ func (r *reasm) push(seq uint32, data []byte, emit func([]byte)) {
 	r.pendBytes -= len(r.pending[seq])
 	r.pending[seq] = append([]byte(nil), data...)
 	r.pendBytes += len(data)
-	if r.pendBytes > maxPending { // gap never filled: skip over it
-		first := true
-		var min uint32
-		for s := range r.pending {
-			if first || seqLess(s, min) {
-				min, first = s, false
-			}
-		}
-		r.next = min
-		r.drain(emit)
+	if r.pendBytes <= maxPending {
+		return
 	}
+	// gap never filled: skip to the lowest pending segment
+	first := true
+	var min uint32
+	for s := range r.pending {
+		if first || seqLess(s, min) {
+			min, first = s, false
+		}
+	}
+	r.next = min
+	r.drain(emit)
 }
 
 func (r *reasm) drain(emit func([]byte)) {
@@ -111,43 +125,48 @@ func (r *reasm) drain(emit func([]byte)) {
 	}
 }
 
+// mirrorFlow is one replayed TCP connection. Fields below mu are guarded by it.
 type mirrorFlow struct {
 	localPort, serverPort uint16
-	mu                    sync.Mutex
-	dir                   [2]reasm
 	out                   [2]chan []byte
 	done                  chan struct{}
 	once                  sync.Once
-	fin                   [2]bool
-	ackWait, respWait     bool // an outbound payload awaits its ACK / first reply payload (under mu)
-	outEnd                uint32
-	outAt, respAt         time.Time
-	ending                bool // end-of-flow goroutine already started (under mu)
-	last                  time.Time
-	addr                  string // "127.0.0.1:x ⇄ 127.0.0.1:y" once connected
 	ready                 atomic.Bool
+	addr                  string // "127.0.0.1:x ⇄ 127.0.0.1:y" once connected
+
+	mu                sync.Mutex
+	dir               [2]reasm
+	fin               [2]bool
+	ackWait, respWait bool // an outbound payload awaits its ACK / first reply payload
+	outEnd            uint32
+	outAt, respAt     time.Time
+	ending            bool // end-of-flow goroutine already started
+	last              time.Time
 }
 
 func (f *mirrorFlow) close() { f.once.Do(func() { close(f.done) }) }
 
+// send queues bytes for the replay writer; drops them if it is stalled rather
+// than blocking the game's packet path.
 func (f *mirrorFlow) send(dir int, b []byte) {
 	select {
 	case f.out[dir] <- append([]byte(nil), b...):
-	default: // writer stalled; dropping is better than blocking the game
+	default:
 	}
 }
 
 type mirror struct {
-	enabled   atomic.Bool
+	enabled    atomic.Bool
 	noLoopback atomic.Bool // true: no TCP replay on 127.0.0.1; meter feed is written separately
-	rttAck    rttStat // outbound payload -> ACK that covers it, as seen by the mirror
-	rttResp   rttStat // outbound payload -> first payload back (application-level)
-	logf      func(string, ...any)
-	trace     func(string, ...any) // disk-only diagnostics; too chatty for the screen
+	rttAck     rttStat     // outbound payload -> ACK that covers it, as seen by the mirror
+	rttResp    rttStat     // outbound payload -> first payload back (application-level)
+	logf       func(string, ...any)
+	trace      func(string, ...any) // disk-only diagnostics; too chatty for the screen
+
 	mu        sync.Mutex
 	flows     map[uint16]*mirrorFlow // by game local port
-	setupMu   sync.Mutex
-	listeners map[uint16]net.Listener // by server port
+	setupMu   sync.Mutex             // serializes listener creation and dialing
+	listeners map[uint16]net.Listener
 	stop      chan struct{}
 	stopOnce  sync.Once
 }
@@ -198,15 +217,20 @@ func newMirror(on bool, logf func(string, ...any)) *mirror {
 	return m
 }
 
+// SetEnabled turns the mirror on or off; turning it off drops every flow.
 func (m *mirror) SetEnabled(on bool) {
 	m.enabled.Store(on)
 	if !on {
-		m.mu.Lock()
-		for k, f := range m.flows {
-			f.close()
-			delete(m.flows, k)
-		}
-		m.mu.Unlock()
+		m.dropAll()
+	}
+}
+
+func (m *mirror) dropAll() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k, f := range m.flows {
+		f.close()
+		delete(m.flows, k)
 	}
 }
 
@@ -246,45 +270,10 @@ func (m *mirror) packet(outbound bool, pkt []byte, p *pktInfo) {
 		local, server, dir = p.dstPort, p.srcPort, dirS2C
 	}
 
-	m.mu.Lock()
-	select {
-	case <-m.stop:
-		m.mu.Unlock()
-		return
-	default:
-	}
-	if !m.enabled.Load() { // re-check under mu: SetEnabled(false) clears flows under it
-		m.mu.Unlock()
-		return
-	}
-	f := m.flows[local]
-	if f != nil {
-		select {
-		case <-f.done: // closed (failed setup / ended): a new flow may replace it
-			f = nil
-		default:
-		}
-	}
-	if outbound && syn && !ack { // new connection from the game
-		if f != nil {
-			f.close()
-		}
-		f = nil
-	}
+	f := m.flowFor(local, server, outbound && syn && !ack, syn || len(payload) > 0)
 	if f == nil {
-		if !(syn || len(payload) > 0) {
-			m.mu.Unlock()
-			return
-		}
-		f = &mirrorFlow{
-			localPort: local, serverPort: server,
-			out:  [2]chan []byte{make(chan []byte, 8192), make(chan []byte, 8192)},
-			done: make(chan struct{}),
-		}
-		m.flows[local] = f
-		go m.setup(f)
+		return
 	}
-	m.mu.Unlock()
 
 	f.mu.Lock()
 	f.last = time.Now()
@@ -323,21 +312,64 @@ func (m *mirror) packet(outbound bool, pkt []byte, p *pktInfo) {
 	}
 	f.mu.Unlock()
 	if end {
-		mirrorEndSpawns.Add(1)
-		go func() {
-			time.Sleep(time.Second) // let the writers flush
-			f.close()
-			m.mu.Lock()
-			if m.flows[local] == f {
-				delete(m.flows, local)
-			}
-			m.mu.Unlock()
-		}()
+		m.endFlow(local, f)
 	}
 }
 
-// mirrorEndSpawns counts end-of-flow goroutines (tests assert one per flow).
-var mirrorEndSpawns atomic.Int32
+// flowFor returns the live flow for a game local port, creating it when the
+// packet starts or carries data. A new SYN replaces a stale flow.
+func (m *mirror) flowFor(local, server uint16, newConn, create bool) *mirrorFlow {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	select {
+	case <-m.stop:
+		return nil
+	default:
+	}
+	if !m.enabled.Load() { // re-check under mu: SetEnabled(false) clears flows under it
+		return nil
+	}
+	f := m.flows[local]
+	if f != nil {
+		select {
+		case <-f.done: // closed (failed setup / ended): replaceable
+			f = nil
+		default:
+		}
+	}
+	if newConn && f != nil {
+		f.close()
+		f = nil
+	}
+	if f != nil {
+		return f
+	}
+	if !create {
+		return nil
+	}
+	f = &mirrorFlow{
+		localPort: local, serverPort: server,
+		out:  [2]chan []byte{make(chan []byte, mirrorChanCap), make(chan []byte, mirrorChanCap)},
+		done: make(chan struct{}),
+	}
+	m.flows[local] = f
+	go m.setup(f)
+	return f
+}
+
+// endFlow closes f after a grace period, once per flow.
+func (m *mirror) endFlow(local uint16, f *mirrorFlow) {
+	mirrorEndSpawns.Add(1)
+	go func() {
+		time.Sleep(mirrorEndGrace)
+		f.close()
+		m.mu.Lock()
+		if m.flows[local] == f {
+			delete(m.flows, local)
+		}
+		m.mu.Unlock()
+	}()
+}
 
 func (m *mirror) listener(port uint16) (net.Listener, error) {
 	if ln := m.listeners[port]; ln != nil {
@@ -354,6 +386,7 @@ func (m *mirror) listener(port uint16) (net.Listener, error) {
 	return ln, nil
 }
 
+// setup opens the loopback pair for f. Setups run one at a time.
 func (m *mirror) setup(f *mirrorFlow) {
 	queued := time.Now()
 	m.setupMu.Lock()
@@ -366,22 +399,12 @@ func (m *mirror) setup(f *mirrorFlow) {
 		return
 	default:
 	}
-	waited := time.Since(queued) // time spent behind other flows' setup
+	waited := time.Since(queued)
 	t0 := time.Now()
-	ln, err := m.listener(f.serverPort)
-	var cli, srv net.Conn
-	if err == nil {
-		cli, err = dialMirror(f.localPort, ln.Addr().String())
-	}
-	if err == nil {
-		srv, err = acceptPeer(ln, cli.LocalAddr().String())
-	}
+	cli, srv, err := m.dialPair(f.localPort, f.serverPort)
 	m.setupMu.Unlock()
 	took := time.Since(t0)
 	if err != nil {
-		if cli != nil {
-			cli.Close()
-		}
 		m.logf("espelho: falhou (%v)", err)
 		m.trace("espelho: fluxo %d->%d FALHOU apos %s (esperou %s na fila): %v",
 			f.localPort, f.serverPort, took.Round(time.Millisecond), waited.Round(time.Millisecond), err)
@@ -401,6 +424,25 @@ func (m *mirror) setup(f *mirrorFlow) {
 	go discard(srv, dirC2S)
 	go writer(cli, f.out[dirC2S], f.done)
 	go writer(srv, f.out[dirS2C], f.done)
+}
+
+// dialPair must run under setupMu. It returns the client leg (from the game
+// port when free) and the server leg, connected through the listener.
+func (m *mirror) dialPair(localPort, serverPort uint16) (cli, srv net.Conn, err error) {
+	ln, err := m.listener(serverPort)
+	if err != nil {
+		return nil, nil, err
+	}
+	cli, err = dialMirror(localPort, ln.Addr().String())
+	if err != nil {
+		return nil, nil, err
+	}
+	srv, err = acceptPeer(ln, cli.LocalAddr().String())
+	if err != nil {
+		cli.Close()
+		return nil, nil, err
+	}
+	return cli, srv, nil
 }
 
 func acceptPeer(ln net.Listener, want string) (net.Conn, error) {
@@ -460,7 +502,7 @@ func writer(c net.Conn, ch chan []byte, done chan struct{}) {
 }
 
 func (m *mirror) janitor() {
-	tk := time.NewTicker(15 * time.Second)
+	tk := time.NewTicker(mirrorJanitorEv)
 	defer tk.Stop()
 	for {
 		select {
@@ -471,7 +513,7 @@ func (m *mirror) janitor() {
 		m.mu.Lock()
 		for k, f := range m.flows {
 			f.mu.Lock()
-			idle := time.Since(f.last) > 3*time.Minute
+			idle := time.Since(f.last) > mirrorIdle
 			f.mu.Unlock()
 			if idle {
 				f.close()
@@ -485,12 +527,7 @@ func (m *mirror) janitor() {
 func (m *mirror) Close() {
 	m.stopOnce.Do(func() {
 		close(m.stop)
-		m.mu.Lock()
-		for k, f := range m.flows {
-			f.close()
-			delete(m.flows, k)
-		}
-		m.mu.Unlock()
+		m.dropAll()
 		m.setupMu.Lock()
 		for k, ln := range m.listeners {
 			ln.Close()
