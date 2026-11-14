@@ -579,7 +579,9 @@ func (e *Engine) capture(pkt []byte, addr *divertAddress) bool {
 	if full && !dnsOrig.IsValid() && class != classSelf && e.conf.Bypass(dst) {
 		return false // LAN, multicast… stays on the local network
 	}
-	if !e.conf.Allowed(dst) {
+	// WFP mode: the selected app's traffic is tunnelled whatever AllowedIPs says.
+	wfpApp := isGame && e.wfpOn.Load() && e.wfp != nil
+	if !wfpApp && !e.conf.Allowed(dst) {
 		// Force UDP: game UDP to destinations excluded by AllowedIPs. The original
 		// keeps the normal Windows route; only the extra copies take the tunnel
 		// (the device accepts any destination, see WGConf.UAPI). No LAN, DNS or VPN endpoints.
