@@ -1,5 +1,6 @@
-// Package tlscert embeds the public AionWG certificate into the executable.
-// Releases reuse this certificate so users never need to reinstall it.
+// Package tlscert embeds the public AionWG code-signing certificate into the
+// executable. The private key (key.pem) is never embedded: the build uses it
+// only to sign the EXE.
 package tlscert
 
 import _ "embed"

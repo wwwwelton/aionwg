@@ -1,4 +1,4 @@
-//go:build windows && embedded
+//go:build windows && !external
 
 package main
 

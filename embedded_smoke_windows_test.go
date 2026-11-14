@@ -1,4 +1,4 @@
-//go:build windows && embedded
+//go:build windows && !external
 
 package main
 
@@ -13,7 +13,17 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// requireAdmin skips tests that extract the runtime into Program Files and load
+// the WinDivert driver; the default build embeds both.
+func requireAdmin(t *testing.T) {
+	t.Helper()
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("needs an elevated shell")
+	}
+}
+
 func TestEmbeddedStandaloneSmoke(t *testing.T) {
+	requireAdmin(t)
 	if err := prepareRuntime(); err != nil {
 		t.Fatal(err)
 	}
@@ -56,6 +66,7 @@ func TestEmbeddedStandaloneSmoke(t *testing.T) {
 }
 
 func TestLiveGamePacketCapture(t *testing.T) {
+	requireAdmin(t)
 	if err := prepareRuntime(); err != nil {
 		t.Fatal(err)
 	}

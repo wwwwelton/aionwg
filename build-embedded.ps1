@@ -23,10 +23,29 @@ try {
     try {
         $env:GOOS = 'windows'; $env:GOARCH = 'amd64'; $env:CGO_ENABLED = '0'
         New-Item -ItemType Directory -Force dist/standalone | Out-Null
-        go build -tags embedded -trimpath -ldflags '-s -w' -o dist/standalone/AionWG.exe .
+        go build -trimpath -ldflags '-s -w' -o dist/standalone/AionWG.exe .
         if ($LASTEXITCODE -ne 0) { throw 'AionWG embedded build failed.' }
     } finally {
         $env:GOOS, $env:GOARCH, $env:CGO_ENABLED = $oldOS, $oldArch, $oldCGO
+    }
+    # Sign with the long-lived certificate when its private key is present (the
+    # key is never in git or in the EXE). Without it the EXE is built unsigned.
+    if ((Test-Path -LiteralPath internal/tlscert/key.pem) -and (Get-Command openssl -ErrorAction SilentlyContinue)) {
+        $rnd = New-Object byte[] 16
+        [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($rnd)
+        $pw = ($rnd | ForEach-Object { $_.ToString('x2') }) -join ''
+        $pfx = Join-Path $PWD 'dist/.sign.pfx'
+        try {
+            openssl pkcs12 -export -inkey internal/tlscert/key.pem -in internal/tlscert/cert.pem -out $pfx -passout "pass:$pw" -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1
+            if ($LASTEXITCODE -ne 0) { throw 'PFX export failed.' }
+            $env:AIONWG_PFX_PW = $pw
+            & (Join-Path $PSScriptRoot 'sign-exe.ps1') -Exe (Resolve-Path dist/standalone/AionWG.exe).Path -Pfx $pfx
+        } finally {
+            Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:AIONWG_PFX_PW -ErrorAction SilentlyContinue
+        }
+    } else {
+        Write-Warning 'EXE not signed (needs internal/tlscert/key.pem and openssl).'
     }
     # Dependencies are embedded in the EXE (runtime_embedded_windows.go); the zip carries
     # only the EXE and the license notices for the bundled code.

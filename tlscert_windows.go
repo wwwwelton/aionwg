@@ -1,4 +1,4 @@
-//go:build windows && embedded
+//go:build windows && !external
 
 package main
 
@@ -19,7 +19,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-const certCN = "DigiCert"
+const certCN = "AionWG Code Signing"
 
 // ensureCertTrusted asks the user whether to install the embedded certificate when it
 // is missing from the Root store, then opens the Windows certificate dialog so the

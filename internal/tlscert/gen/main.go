@@ -1,20 +1,23 @@
-// Command gen creates the self-signed AionWG certificate and key in internal/tlscert.
-// The pair is reused when present and valid, so builds keep the same certificate.
-// Pass -new to rotate it (machines that trusted the old one must trust the new one).
-// Run by build-embedded.sh and build-embedded.ps1 before every embedded build.
+// Command gen creates the AionWG code-signing certificate and key in
+// internal/tlscert. cert.pem (public) is tracked and embedded in the EXE so the
+// program can offer to trust it; key.pem is the private key, kept out of git and
+// out of the EXE, and used only by the build to sign the EXE (Authenticode).
+// The certificate has no practical expiry (notAfter 9999-12-31, RFC 5280's "no
+// well-defined expiration") and is meant to sign every build: keep key.pem safe,
+// because rotating it makes every machine trust a new certificate.
+// The pair is reused when cert.pem is valid; pass -new to rotate it.
+// Run by build-embedded.sh and build-embedded.ps1 before every build.
 package main
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"flag"
 	"log"
 	"math/big"
-	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -29,8 +32,7 @@ func main() {
 	}
 	if !*rotate {
 		if c, err := os.ReadFile(filepath.Join(dir, "cert.pem")); err == nil {
-			block, _ := pem.Decode(c)
-			if block != nil {
+			if block, _ := pem.Decode(c); block != nil {
 				if _, err := x509.ParseCertificate(block.Bytes); err == nil {
 					log.Print("reusing existing certificate (use -new to rotate)")
 					return
@@ -38,7 +40,7 @@ func main() {
 			}
 		}
 	}
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	key, err := rsa.GenerateKey(rand.Reader, 3072)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -46,17 +48,17 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	now := time.Now()
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "DigiCert"},
-		NotBefore:             now.Add(-time.Hour),
-		NotAfter:              now.AddDate(10, 0, 0),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		Subject:               pkix.Name{CommonName: "AionWG Code Signing", Organization: []string{"AionWG"}},
+		NotBefore:             time.Now().UTC().Add(-time.Hour),
+		NotAfter:              time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
 		BasicConstraintsValid: true,
 		IsCA:                  true,
-		DNSNames:              []string{"localhost"},
-		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1)},
+		MaxPathLen:            0,
+		MaxPathLenZero:        true,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
@@ -72,4 +74,5 @@ func main() {
 	if err := os.WriteFile(filepath.Join(dir, "key.pem"), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
 		log.Fatal(err)
 	}
+	log.Print("new certificate created; BACK UP internal/tlscert/key.pem (it is not in git)")
 }

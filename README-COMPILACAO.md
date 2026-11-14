@@ -78,8 +78,10 @@ do jogo como o par loopback do espelho) e restaura a API original ao desligar
 `[m]` ou sair. Não há EXE separado, driver novo ou alteração no AION2.
 
 `./build-embedded.sh` compila a DLL (`shugo-compat.dll`, MinGW-w64) e o EXE.
-No build tradicional, mantenha `shugo-compat.dll` ao lado do `AionWG.exe`.
-Se a DLL faltar, o log do AionWG avisa e o resto funciona normalmente.
+Qualquer `go build` para Windows já embute `shugo-compat.dll`, `WinDivert.dll`,
+`WinDivert64.sys` e `wintun.dll`; só `-tags external` volta ao modo antigo, com as
+DLLs ao lado do `AionWG.exe`. Se a DLL do Shugo faltar, o log avisa e o resto
+funciona normalmente.
 
 Regressão do pareamento, sem Windows ou acesso à rede:
 
@@ -88,7 +90,7 @@ cc -std=c11 -Wall -Wextra -Werror native/shugo-compat-test.c -o /tmp/shugo-check
 /tmp/shugo-check
 ```
 
-## EXEs com dependências embutidas
+## EXE com dependências embutidas (padrão) e assinatura
 
 Linux: `./build-embedded.sh`. Windows: `.\build-embedded.ps1`.
 Requer Go, MinGW-w64 e os inputs `WinDivert.dll`, `WinDivert64.sys` e
@@ -96,15 +98,23 @@ Requer Go, MinGW-w64 e os inputs `WinDivert.dll`, `WinDivert64.sys` e
 
 Saídas: `dist/standalone/AionWG.exe` e
 `dist/AionWG-standalone-windows-x64.zip`.
-Os EXEs não precisam de DLLs ou SYS ao lado. Ao iniciar como Administrador,
-extraem seus próprios arquivos para uma pasta versionada pelo conteúdo em
+O EXE não precisa de DLLs ou SYS ao lado. Ao iniciar como Administrador,
+extrai os próprios arquivos para uma pasta versionada pelo conteúdo em
 `C:\Program Files\AionWG-Runtime`. Conteúdo já extraído é conferido antes do uso;
 arquivos modificados causam erro, sem substituição silenciosa.
 O Npcap continua sendo instalado separadamente. Nenhum `.conf` é embutido.
 
-Na validação Windows deste build, o AionWG carregou as DLLs embutidas e abriu
-WinDivert com filtro sem tráfego. A integração do relay Shugo embutida ainda não foi
-validada no Windows (o helper separado foi bloqueado pelo Defender).
+**Assinatura (Authenticode).** `internal/tlscert/cert.pem` é o certificado público
+de assinatura de código `AionWG Code Signing`, sem expiração prática (válido até
+9999-12-31) e o mesmo em todo build. Ele vai embutido no EXE só para o programa
+oferecer instalá-lo como raiz confiável. A chave privada `internal/tlscert/key.pem`
+**não está no git nem no EXE**: o build a usa para assinar o EXE (SHA-256, sem
+timestamp, porque o certificado não expira). Faça backup de `key.pem`; sem ela o
+build sai sem assinatura e trocar o certificado (`go run ./internal/tlscert/gen -new`)
+faz toda máquina precisar confiar num certificado novo. O status da assinatura só
+vira `Valid` onde o certificado está instalado como raiz confiável.
+
+O EXE novo ainda não foi validado em partida real com o relay Shugo embutido.
 
 ## Ajustes de latência no cliente Windows
 
