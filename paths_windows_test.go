@@ -90,12 +90,13 @@ func TestUDPPathsCaptureDistributesGameFlows(t *testing.T) {
 	dst := netip.MustParseAddr("203.0.113.10")
 	owner := &ownerTracker{cache: map[portKey]ownerEntry{}}
 	e := &Engine{
-		conf:   &WGConf{Peers: []PeerConf{{AllowedIPs: []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")}}}},
-		addr4:  netip.MustParseAddr("172.16.0.2"),
-		tun:    newSplitTun(1420),
-		owner:  owner,
-		mirror: newMirror(false, func(string, ...any) {}),
-		nat:    make(map[portKey]*natEntry),
+		conf:    &WGConf{Peers: []PeerConf{{AllowedIPs: []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")}}}},
+		addr4:   netip.MustParseAddr("172.16.0.2"),
+		tun:     newSplitTun(1420),
+		owner:   owner,
+		mirror:  newMirror(false, func(string, ...any) {}),
+		nat:     make(map[portKey]*natEntry),
+		gameDst: map[netip.Addr]bool{},
 	}
 	defer e.mirror.Close()
 	e.epCur.Store(&[]netip.AddrPort{netip.MustParseAddrPort("162.159.192.1:2408")})
