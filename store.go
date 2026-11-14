@@ -20,7 +20,7 @@ type Settings struct {
 	LastConfig   string   `json:"last_config"`
 	Version      int      `json:"version"`
 	Mirror       bool     `json:"mirror"`
-	UDPDuplicate bool     `json:"udp_duplicate"`  // optional direct UDP clone; default OFF
+	UDPDuplicate bool     `json:"udp_duplicate"`  // optional tunnel UDP clone; default OFF
 	UDPOriginals int      `json:"udp_originals"`  // A of A:B: every A originals release UDPCopies copies, 1..8
 	UDPCopies    int      `json:"udp_copies"`     // B of A:B: copies per group, 1..8
 	UDPForce     bool     `json:"udp_force"`      // duplicate even game UDP outside AllowedIPs, except LAN/DNS

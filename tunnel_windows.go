@@ -64,7 +64,7 @@ type EngineOptions struct {
 	Processes    []string
 	PingTarget   string
 	Mirror       bool
-	UDPDuplicate bool // send game UDP extra copies via Windows direct route
+	UDPDuplicate bool // send game UDP extra copies through the tunnel (Force UDP ones go direct)
 	UDPOriginals int  // A of A:B ratio
 	UDPCopies    int  // B of A:B ratio
 	UDPForce     bool // also copy game UDP outside AllowedIPs; never DNS/LAN/full tunnel
@@ -145,8 +145,8 @@ type Stats struct {
 
 type outboundUDPJob struct {
 	packet   []byte // original routed packet, already SNAT'd for WireGuard
-	copyUDP  []byte // optional original (pre-SNAT) for direct secondary copying
-	copyAddr divertAddress
+	copyUDP  []byte // optional copy of packet for the secondary (duplicate) send
+	copyAddr dupTarget
 }
 
 type Engine struct {
@@ -162,7 +162,7 @@ type Engine struct {
 	shugoMu      sync.Mutex
 	shugo        *shugoCompat  // Shugo.gg relay view; exists only while [m] is on
 	shugoOld     chan struct{} // done of the last supervisor being stopped in the background
-	udpDup       *udpDuplicator[divertAddress]
+	udpDup       *udpDuplicator[dupTarget]
 	udpForce     atomic.Bool
 	latestOut    atomic.Bool
 	latestIn     atomic.Bool
@@ -351,7 +351,7 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 	e.owner = newOwnerTracker(opt.Processes)
 	e.mirror = newMirror(opt.Mirror, logf)
 	e.mirror.trace = e.logDisk
-	e.udpDup = newUDPDuplicator[divertAddress](udpDupQueueSize, opt.UDPDuplicate)
+	e.udpDup = newUDPDuplicator[dupTarget](udpDupQueueSize, opt.UDPDuplicate)
 	e.udpDup.setRatio(opt.UDPOriginals, opt.UDPCopies)
 	e.udpForce.Store(opt.UDPForce)
 	e.latestOut.Store(opt.UDPNewestOut)
@@ -564,7 +564,7 @@ func (e *Engine) capture(pkt []byte, addr *divertAddress) bool {
 		if e.udpDup != nil && e.udpForce.Load() &&
 			shouldDuplicateGameUDP(isGame, full, p.proto, p.dstPort) &&
 			!e.conf.Bypass(dst) && dst.IsGlobalUnicast() {
-			e.udpDup.offer(pkt[:pktLen(pkt, &p)], *addr)
+			e.udpDup.offer(pkt[:pktLen(pkt, &p)], dupTarget{addr: *addr}) // excluded by AllowedIPs: cannot use the tunnel
 		}
 		return false
 	}
@@ -616,16 +616,16 @@ func (e *Engine) capture(pkt []byte, addr *divertAddress) bool {
 			job := outboundUDPJob{packet: q}
 			if eligibleCopy {
 				// Keep the source buffer alive for the asynchronous worker.
-				job.copyUDP = clonePktBuf(pkt[:pktLen(pkt, &p)])
-				job.copyAddr = *addr
+				job.copyUDP = clonePktBuf(q) // before offer: the queue takes ownership of q
+				job.copyAddr = dupTarget{tunnel: true}
 			}
 			e.outboundQ.offer(job)
 		} else {
-			e.tun.inject(q)
 			if eligibleCopy {
-				// Original has been submitted to the VPN before the copy.
-				e.udpDup.offer(pkt[:pktLen(pkt, &p)], *addr)
+				// Queue the copy before inject: inject hands q to the tunnel, which recycles it.
+				e.udpDup.offer(q, dupTarget{tunnel: true})
 			}
+			e.tun.inject(q)
 		}
 	}
 	return true

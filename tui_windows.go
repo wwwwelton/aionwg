@@ -437,7 +437,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.eng.SetUDPDuplicate(m.settings.UDPDuplicate)
 			}
 			if m.settings.UDPDuplicate {
-				m.log("UDP %s LIGADO: original no WireGuard e copias diretas; nao garante ping menor.", udpRatioLabel(m.settings.UDPOriginals, m.settings.UDPCopies))
+				m.log("UDP %s LIGADO: original e copias pelo tunel WireGuard; nao garante ping menor.", udpRatioLabel(m.settings.UDPOriginals, m.settings.UDPCopies))
 			} else {
 				m.log("UDP DESLIGADO: sem copias extras")
 			}
