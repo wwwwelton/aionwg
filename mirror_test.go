@@ -177,3 +177,23 @@ func TestMirrorClosedFlowIsReplacedBySyn(t *testing.T) {
 		t.Fatal("closed flow was not replaced")
 	}
 }
+
+func TestMirrorMeasuresAckAndReplyRTT(t *testing.T) {
+	m := newMirror(true, t.Logf)
+	defer m.Close()
+	withAck := func(b []byte, ack uint32) []byte { binary.BigEndian.PutUint32(b[28:], ack); return b }
+	feedPkt(m, true, mkTCP("10.0.0.2", "1.2.3.4", 44000, 443, 100, 0x02, nil))
+	feedPkt(m, true, mkTCP("10.0.0.2", "1.2.3.4", 44000, 443, 101, 0x18, []byte("hello")))
+	time.Sleep(40 * time.Millisecond)
+	feedPkt(m, false, withAck(mkTCP("1.2.3.4", "10.0.0.2", 443, 44000, 500, 0x10, nil), 105)) // does not cover seq 106: no sample
+	feedPkt(m, false, withAck(mkTCP("1.2.3.4", "10.0.0.2", 443, 44000, 500, 0x10, nil), 106))
+	time.Sleep(30 * time.Millisecond)
+	feedPkt(m, false, withAck(mkTCP("1.2.3.4", "10.0.0.2", 443, 44000, 500, 0x18, []byte("reply")), 106))
+	ack, resp := m.RTT()
+	if ack.N != 1 || ack.Last < 40*time.Millisecond || ack.Last > 70*time.Millisecond {
+		t.Fatalf("ack rtt = %+v", ack)
+	}
+	if resp.N != 1 || resp.Last < 70*time.Millisecond {
+		t.Fatalf("reply rtt = %+v", resp)
+	}
+}

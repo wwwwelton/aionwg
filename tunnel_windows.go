@@ -127,6 +127,8 @@ type Stats struct {
 	UDPDupDropped    uint64 // copies dropped rather than slowing the original
 	UDPDupErrors     uint64 // secondary path errors
 	MirrorFlows      []string
+	MirrorAck        MirrorRTT // ACK round trip of the game TCP as seen by the mirror
+	MirrorResp       MirrorRTT // request -> first reply payload (application level)
 	MeterAdapter     string
 	MeterOK          bool
 	FullTunnel       bool
@@ -766,6 +768,11 @@ func (e *Engine) housekeeping() {
 			if line := formatHealth(cur, prev); line != "" {
 				e.logDisk("%s", line)
 			}
+			if ack, resp := e.mirror.RTT(); ack.N+resp.N > 0 {
+				e.logDisk("[espelho-rtt] ack=%v (media %v, n=%d) resposta=%v (media %v, n=%d)",
+					ack.Last.Round(time.Millisecond), ack.Avg.Round(time.Millisecond), ack.N,
+					resp.Last.Round(time.Millisecond), resp.Avg.Round(time.Millisecond), resp.N)
+			}
 			prev = cur
 		case <-tk.C:
 			cut := time.Now().Add(-5 * time.Minute)
@@ -1017,6 +1024,7 @@ func (e *Engine) Stats() Stats {
 	e.meterMu.Unlock()
 	s.MirrorFlows = e.mirror.Flows()
 	sort.Strings(s.MirrorFlows)
+	s.MirrorAck, s.MirrorResp = e.mirror.RTT()
 
 	e.pingMu.Lock()
 	s.PingEndpoint = e.pings[0].result()

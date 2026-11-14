@@ -832,7 +832,24 @@ func row(label, value string) string {
 
 // ---------------------------------------------------------------- view
 
+// View renders the densest-needed layout: full detail when it fits the
+// terminal height, otherwise three more compact levels (see render).
 func (m model) View() string {
+	out := m.render(0)
+	for level := 1; level <= 3 && m.height > 0 && lipgloss.Height(out) > m.height; level++ {
+		out = m.render(level)
+	}
+	if lines := strings.Split(out, "\n"); m.height > 0 && len(lines) > m.height {
+		// still too tall (tiny terminal): keep the header and the bottom (prompt / keys)
+		out = lines[0] + "\n" + strings.Join(lines[len(lines)-m.height+1:], "\n")
+	}
+	return out
+}
+
+// render builds the screen. level 0 = everything; 1 = Ping beside Tráfego on
+// wide terminals, one-line config list, no "Ordem UDP" row; 2 = also no
+// sparklines/charts and a shorter route.
+func (m model) render(level int) string {
 	w := m.width
 	if w < 70 {
 		w = 70
@@ -882,19 +899,26 @@ func (m model) View() string {
 				procs = lipgloss.NewStyle().Foreground(cYellow).Render("nenhum app marcado em execução ([l] escolhe)")
 			}
 		}
+		modo := []string{row("Modo", modeStatus(s)), row("Conexões", flowStatus(s))}
+		if level >= 3 {
+			modo = []string{row("Modo", modeStatus(s)+sDim.Render("  ·  ")+flowStatus(s))}
+		}
 		stat = append(stat,
 			row("Config", sBold.Render(m.engName)+sDim.Render("  · ativo há "+time.Since(m.since).Round(time.Second).String())),
 			row("Endpoint", s.Endpoint+sDim.Render("   túnel ")+s.TunnelAddr+sDim.Render("   [v] troca")),
 			row("Handshake", hs),
 			row(procLabel, procs),
-			row("Modo", modeStatus(s)),
-			row("Conexões", flowStatus(s)),
+		)
+		stat = append(stat, modo...)
+		stat = append(stat,
 			row("Espelho DPS", mirrorStatus(s)),
 			row("UDP extra", udpDupStatus(s)),
-			row("Ordem UDP", fmt.Sprintf("saida recente %v (perdas %d) · chegada recente %v (perdas %d)", s.UDPNewestOut, s.UDPSendDropped, s.UDPNewestIn, s.UDPRecvDropped)),
 		)
+		if level == 0 {
+			stat = append(stat, row("Ordem UDP", fmt.Sprintf("saida recente %v (perdas %d) · chegada recente %v (perdas %d)", s.UDPNewestOut, s.UDPSendDropped, s.UDPNewestIn, s.UDPRecvDropped)))
+		}
 		stat = append(stat, row("Melhor rota", routeStatus(s)))
-		if s.RouteNote != "" {
+		if s.RouteNote != "" && level < 3 {
 			stat = append(stat, row("", sDim.Render(s.RouteNote)))
 		}
 	} else {
@@ -926,6 +950,11 @@ func (m model) View() string {
 	}
 
 	// ping panel
+	wide := level >= 1 && w >= 130
+	pw := inner // content width of the Ping / Tráfego boxes
+	if wide {
+		pw = (w-2)/2 - 2
+	}
 	var ping []string
 	if m.eng != nil {
 		s := m.stats
@@ -936,9 +965,18 @@ func (m model) View() string {
 			row(gameLbl, fmtPing(s.PingGame)+sDim.Render("  "+s.PingGame.Target)),
 			row("Jogo (direto)", fmtPing(s.PingGameDirect)+sDim.Render("  "+s.PingGameDirect.Target)),
 			row("Custo do túnel", tunnelCost(s)),
-			sLabel.Render(fmt.Sprintf("%-12s", "Histórico"))+sparkline(m.histPing, inner-14, func(v float64) lipgloss.Color { return pingColor(v) }, true, m.frame),
-			sLabel.Render(fmt.Sprintf("%-12s", ""))+histStats(m.histPing, func(v float64) string { return fmt.Sprintf("%.0f ms", v) }),
 		)
+		if s.MirrorAck.N+s.MirrorResp.N > 0 {
+			ping = append(ping, row("Espelho RTT", sDim.Render(fmt.Sprintf("ack %v (média %v) · resposta %v (média %v)",
+				s.MirrorAck.Last.Round(time.Millisecond), s.MirrorAck.Avg.Round(time.Millisecond),
+				s.MirrorResp.Last.Round(time.Millisecond), s.MirrorResp.Avg.Round(time.Millisecond)))))
+		}
+		if level < 2 {
+			ping = append(ping, sLabel.Render(fmt.Sprintf("%-12s", "Histórico"))+sparkline(m.histPing, pw-14, func(v float64) lipgloss.Color { return pingColor(v) }, true, m.frame))
+		}
+		if level == 0 {
+			ping = append(ping, sLabel.Render(fmt.Sprintf("%-12s", ""))+histStats(m.histPing, func(v float64) string { return fmt.Sprintf("%.0f ms", v) }))
+		}
 	}
 
 	// traffic panel
@@ -949,23 +987,30 @@ func (m model) View() string {
 			a := lipgloss.NewStyle().Foreground(cUp).Bold(true).Width(18).Render("▲ " + fmtRate(up))
 			return a + lipgloss.NewStyle().Foreground(cDown).Bold(true).Render("▼ "+fmtRate(down))
 		}
-		{
-			lbl := "Túnel total"
-			if s.FullTunnel {
-				lbl = "Sistema"
+		tot := func(label string, up, down float64, tu, td uint64) []string {
+			r := row(label, pair(up, down))
+			t := fmt.Sprintf("total ▲ %s  ▼ %s", fmtBytes(tu), fmtBytes(td))
+			if level >= 3 {
+				return []string{r + sDim.Render("  "+t)}
 			}
-			traffic = append(traffic,
-				row(lbl, pair(m.upRate, m.downRate)),
-				row("", sDim.Render(fmt.Sprintf("total ▲ %s  ▼ %s", fmtBytes(s.Up), fmtBytes(s.Down)))))
+			return []string{r, row("", sDim.Render(t))}
 		}
+		lbl := "Túnel total"
+		if s.FullTunnel {
+			lbl = "Sistema"
+		}
+		traffic = append(traffic, tot(lbl, m.upRate, m.downRate, s.Up, s.Down)...)
+		traffic = append(traffic, tot("AION 2", m.gUpRate, m.gDnRate, s.GameUp, s.GameDown)...)
 		traffic = append(traffic,
-			row("AION 2", pair(m.gUpRate, m.gDnRate)),
-			row("", sDim.Render(fmt.Sprintf("total ▲ %s  ▼ %s", fmtBytes(s.GameUp), fmtBytes(s.GameDown)))),
 			row("WireGuard", sDim.Render(fmt.Sprintf("▲ %s  ▼ %s  (com overhead · total ▲ %s ▼ %s)",
 				fmtRate(m.wgTxRate), fmtRate(m.wgRxRate), fmtBytes(s.WGTx), fmtBytes(s.WGRx)))),
-			sLabel.Render(fmt.Sprintf("%-12s", "Upload"))+rateChart(m.histUp, inner-14, fixedColor(cUp), m.frame),
-			sLabel.Render(fmt.Sprintf("%-12s", "Download"))+rateChart(m.histDown, inner-14, fixedColor(cDown), m.frame),
 		)
+		if level < 2 {
+			traffic = append(traffic,
+				sLabel.Render(fmt.Sprintf("%-12s", "Upload"))+rateChart(m.histUp, pw-14, fixedColor(cUp), m.frame),
+				sLabel.Render(fmt.Sprintf("%-12s", "Download"))+rateChart(m.histDown, pw-14, fixedColor(cDown), m.frame),
+			)
+		}
 	}
 
 	// configs
@@ -974,6 +1019,9 @@ func (m model) View() string {
 		cfg = append(cfg, sDim.Render("(nenhuma — [i] para importar)"))
 	}
 	for i, c := range m.configs {
+		if level >= 1 && m.eng != nil && i != m.cursor {
+			continue // connected and short of room: only the selected config
+		}
 		mark := "  "
 		line := c
 		if i == m.cursor {
@@ -983,6 +1031,9 @@ func (m model) View() string {
 		if m.eng != nil && c == m.engName {
 			line += lipgloss.NewStyle().Foreground(cGreen).Render("  ● em uso")
 		}
+		if level >= 1 && m.eng != nil && len(m.configs) > 1 {
+			line += sDim.Render(fmt.Sprintf("   (%d configs · ↑↓ escolhe)", len(m.configs)))
+		}
 		cfg = append(cfg, mark+line)
 	}
 
@@ -990,10 +1041,27 @@ func (m model) View() string {
 		t := lipgloss.NewStyle().Foreground(cAccent).Bold(true).Render(title)
 		return sBox.Width(inner).Render(t + "\n" + strings.Join(lines, "\n"))
 	}
+	halfBox := func(title string, lines []string) string {
+		t := lipgloss.NewStyle().Foreground(cAccent).Bold(true).Render(title)
+		return sBox.Width(pw).Render(t + "\n" + strings.Join(lines, "\n"))
+	}
 
+	routeMax := 10
+	if level >= 2 {
+		routeMax = 4
+	}
 	parts := []string{header, box("Status", stat)}
 	if m.eng != nil {
-		parts = append(parts, box("Ping", ping), box("Rota em uso (traceroute)", routeLines(m.stats)), box("Tráfego", traffic))
+		routeLn := routeLinesMax(m.stats, routeMax)
+		if level >= 3 {
+			routeLn = routeSummary(m.stats)
+		}
+		rt := box("Rota em uso (traceroute)", routeLn)
+		if wide {
+			parts = append(parts, lipgloss.JoinHorizontal(lipgloss.Top, halfBox("Ping", ping), halfBox("Tráfego", traffic)), rt)
+		} else {
+			parts = append(parts, box("Ping", ping), rt, box("Tráfego", traffic))
+		}
 	}
 	if m.eng != nil && m.showDiag {
 		d, r := m.stats.Diag, m.diagRate
@@ -1039,14 +1107,44 @@ func (m model) View() string {
 	}
 	parts = append(parts, box("Configs", cfg))
 
-	// logs: fill remaining height
+	// footer / prompt, built first so the log is sized with its real height
+	var foot string
+	switch m.mode {
+	case modeImport:
+		foot = sBold.Render("Caminho do .conf: ") + m.input.View() + sDim.Render("  [Enter] ok  [Esc] cancelar")
+	case modeProcs:
+		foot = sBold.Render("Processos (separados por vírgula): ") + m.input.View()
+	case modePing:
+		foot = sBold.Render("IP para ping no túnel: ") + m.input.View()
+	case modeUDPCopies:
+		foot = sBold.Render("Proporcao UDP (X = 1:X, X:X = rajada; X 1..8): ") + m.input.View() + sDim.Render("  [Enter] ok  [Esc] cancelar")
+	case modeEndpoint:
+		foot = sBold.Render("Novo endpoint (IP ou IP:porta): ") + m.input.View() + sDim.Render("  [Enter] ok  [Esc] cancelar")
+	case modeDelete:
+		foot = lipgloss.NewStyle().Foreground(cRed).Bold(true).Render(
+			fmt.Sprintf("Remover %s? [s/y] sim  [qualquer tecla] não", m.configs[m.cursor]))
+	case modeWFPApps:
+		foot = m.wfpPicker(w)
+	default:
+		k := func(key, desc string) string { return sKey.Render("["+key+"]") + " " + sDim.Render(desc) }
+		act := "conectar"
+		if m.eng != nil {
+			act = "desconectar"
+		}
+		foot = lipgloss.NewStyle().Width(w).Render(strings.Join([]string{
+			k("Enter", act), k("i", "importar"), k("↑↓", "escolher"), k("p", "processos"),
+			k("w", "WFP"), k("l", "apps WFP"),
+			k("s", "sistema inteiro"), k("n", "DNS túnel"), k("b", "melhor rota"), k("v", "trocar endpoint"), k("m", "espelho DPS"), k("u", "dup UDP"), k("r", "proporcao"), k("f", "forcar UDP"), k("o", "envio recente"), k("a", "chegada recente"), k("x", "autoteste"), k("g", "diagnóstico"), k("e", "exportar p/ WG oficial"), k("t", "alvo do ping"), k("d", "remover"), k("q", "sair"),
+		}, "  "))
+	}
+
+	// logs: fill remaining height (log box = 2 borders + title)
 	logN := 6
 	if m.height > 0 {
-		used := lipgloss.Height(strings.Join(parts, "\n")) + 6
-		if n := m.height - used; n > 3 {
-			logN = n
-		} else {
-			logN = 3
+		used := lipgloss.Height(strings.Join(parts, "\n")) + 3 + lipgloss.Height(foot)
+		logN = max(m.height-used, 1)
+		if level == 0 {
+			logN = max(logN, 3)
 		}
 	}
 	lg := m.logs
@@ -1066,35 +1164,7 @@ func (m model) View() string {
 	}
 	parts = append(parts, box("Log", lgr))
 
-	// footer / prompt
-	switch m.mode {
-	case modeImport:
-		parts = append(parts, sBold.Render("Caminho do .conf: ")+m.input.View()+sDim.Render("  [Enter] ok  [Esc] cancelar"))
-	case modeProcs:
-		parts = append(parts, sBold.Render("Processos (separados por vírgula): ")+m.input.View())
-	case modePing:
-		parts = append(parts, sBold.Render("IP para ping no túnel: ")+m.input.View())
-	case modeUDPCopies:
-		parts = append(parts, sBold.Render("Proporcao UDP (X = 1:X, X:X = rajada; X 1..8): ")+m.input.View()+sDim.Render("  [Enter] ok  [Esc] cancelar"))
-	case modeEndpoint:
-		parts = append(parts, sBold.Render("Novo endpoint (IP ou IP:porta): ")+m.input.View()+sDim.Render("  [Enter] ok  [Esc] cancelar"))
-	case modeDelete:
-		parts = append(parts, lipgloss.NewStyle().Foreground(cRed).Bold(true).Render(
-			fmt.Sprintf("Remover %s? [s/y] sim  [qualquer tecla] não", m.configs[m.cursor])))
-	case modeWFPApps:
-		parts = append(parts, m.wfpPicker(w))
-	default:
-		k := func(key, desc string) string { return sKey.Render("["+key+"]") + " " + sDim.Render(desc) }
-		act := "conectar"
-		if m.eng != nil {
-			act = "desconectar"
-		}
-		parts = append(parts, lipgloss.NewStyle().Width(w).Render(strings.Join([]string{
-			k("Enter", act), k("i", "importar"), k("↑↓", "escolher"), k("p", "processos"),
-			k("w", "WFP"), k("l", "apps WFP"),
-			k("s", "sistema inteiro"), k("n", "DNS túnel"), k("b", "melhor rota"), k("v", "trocar endpoint"), k("m", "espelho DPS"), k("u", "dup UDP"), k("r", "proporcao"), k("f", "forcar UDP"), k("o", "envio recente"), k("a", "chegada recente"), k("x", "autoteste"), k("g", "diagnóstico"), k("e", "exportar p/ WG oficial"), k("t", "alvo do ping"), k("d", "remover"), k("q", "sair"),
-		}, "  ")))
-	}
+	parts = append(parts, foot)
 	return strings.Join(parts, "\n")
 }
 
@@ -1255,9 +1325,12 @@ func collapseLines(lines []string, max int) []string {
 	return append(out, lines[len(lines)-tail:]...)
 }
 
-// routeLines draws the route in use like a traceroute: the hops from this PC to
-// the VPN endpoint, then the hops inside the tunnel to the game server.
-func routeLines(s Stats) []string {
+func routeLines(s Stats) []string { return routeLinesMax(s, 10) }
+
+// routeLinesMax draws the route in use like a traceroute: the hops from this PC
+// to the VPN endpoint, then the hops inside the tunnel to the game server; each
+// segment is collapsed to at most maxHops lines.
+func routeLinesMax(s Stats, maxHops int) []string {
 	rt := s.Route
 	if rt.At.IsZero() {
 		return []string{sDim.Render("medindo a rota…")}
@@ -1283,7 +1356,7 @@ func routeLines(s Stats) []string {
 			}
 			lines[i] = hop(h, m)
 		}
-		return collapseLines(lines, 10)
+		return collapseLines(lines, maxHops)
 	}
 	age := time.Since(rt.At).Round(time.Second)
 	out := []string{sBold.Render("PC") + sDim.Render(" → internet → endpoint ") + rt.Endpoint.String() + sDim.Render(fmt.Sprintf("   (medido há %s)", age))}
@@ -1317,4 +1390,26 @@ func tunnelCost(s Stats) string {
 		note = "  (o túnel soma isso ao ping do jogo)"
 	}
 	return lipgloss.NewStyle().Foreground(col).Bold(true).Render(fmt.Sprintf("%+d ms", diff)) + sDim.Render(note)
+}
+
+// routeSummary is the two-line route for small terminals: hop count and the
+// round trip to the endpoint / destination.
+func routeSummary(s Stats) []string {
+	rt := s.Route
+	if rt.At.IsZero() {
+		return []string{sDim.Render("medindo a rota…")}
+	}
+	seg := func(hops []Hop, dest netip.Addr) string {
+		out := fmt.Sprintf("%d saltos", len(hops))
+		for _, h := range hops {
+			if h.Addr == dest {
+				return out + fmt.Sprintf(", chegou em %.0f ms", float64(h.RTT.Microseconds())/1000)
+			}
+		}
+		return out + ", destino sem resposta ICMP"
+	}
+	return []string{
+		sBold.Render("PC → endpoint ") + rt.Endpoint.String() + sDim.Render("  "+seg(rt.Direct, rt.Endpoint)),
+		sBold.Render("túnel → ") + rt.Dest.String() + sDim.Render("  "+seg(rt.Tunnel, rt.Dest)),
+	}
 }

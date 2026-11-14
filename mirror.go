@@ -119,6 +119,9 @@ type mirrorFlow struct {
 	done                  chan struct{}
 	once                  sync.Once
 	fin                   [2]bool
+	ackWait, respWait     bool // an outbound payload awaits its ACK / first reply payload (under mu)
+	outEnd                uint32
+	outAt, respAt         time.Time
 	ending                bool // end-of-flow goroutine already started (under mu)
 	last                  time.Time
 	addr                  string // "127.0.0.1:x ⇄ 127.0.0.1:y" once connected
@@ -136,6 +139,8 @@ func (f *mirrorFlow) send(dir int, b []byte) {
 
 type mirror struct {
 	enabled   atomic.Bool
+	rttAck    rttStat // outbound payload -> ACK that covers it, as seen by the mirror
+	rttResp   rttStat // outbound payload -> first payload back (application-level)
 	logf      func(string, ...any)
 	trace     func(string, ...any) // disk-only diagnostics; too chatty for the screen
 	mu        sync.Mutex
@@ -145,6 +150,39 @@ type mirror struct {
 	stop      chan struct{}
 	stopOnce  sync.Once
 }
+
+// rttStat keeps the last and a smoothed (1/8) round-trip sample; lock-free,
+// a lost update only skips one sample.
+type rttStat struct {
+	last, avg atomic.Int64
+	n         atomic.Uint64
+}
+
+func (r *rttStat) add(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	r.last.Store(int64(d))
+	r.n.Add(1)
+	if old := r.avg.Load(); old == 0 {
+		r.avg.Store(int64(d))
+	} else {
+		r.avg.Store(old + (int64(d)-old)/8)
+	}
+}
+
+// MirrorRTT is a snapshot of rttStat.
+type MirrorRTT struct {
+	Last, Avg time.Duration
+	N         uint64
+}
+
+func (r *rttStat) snapshot() MirrorRTT {
+	return MirrorRTT{time.Duration(r.last.Load()), time.Duration(r.avg.Load()), r.n.Load()}
+}
+
+// RTT returns the ACK round trip and the request->reply time seen by the mirror.
+func (m *mirror) RTT() (ack, resp MirrorRTT) { return m.rttAck.snapshot(), m.rttResp.snapshot() }
 
 func newMirror(on bool, logf func(string, ...any)) *mirror {
 	m := &mirror{
@@ -256,6 +294,25 @@ func (m *mirror) packet(outbound bool, pkt []byte, p *pktInfo) {
 		seq++
 	}
 	f.dir[dir].push(seq, payload, func(b []byte) { f.send(dir, b) })
+	if outbound {
+		if len(payload) > 0 {
+			if !f.ackWait {
+				f.ackWait, f.outEnd, f.outAt = true, seq+uint32(len(payload)), f.last
+			}
+			if !f.respWait {
+				f.respWait, f.respAt = true, f.last
+			}
+		}
+	} else {
+		if f.ackWait && ack && int32(binary.BigEndian.Uint32(t[8:])-f.outEnd) >= 0 {
+			f.ackWait = false
+			m.rttAck.add(f.last.Sub(f.outAt))
+		}
+		if f.respWait && len(payload) > 0 {
+			f.respWait = false
+			m.rttResp.add(f.last.Sub(f.respAt))
+		}
+	}
 	if fin {
 		f.fin[dir] = true
 	}
