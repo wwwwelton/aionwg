@@ -21,6 +21,9 @@ import (
 
 const certCN = "AionWG Code Signing"
 
+// certPromptEnabled is false only in tests, which must never open a dialog.
+var certPromptEnabled = true
+
 // ensureCertTrusted asks the user whether to install the embedded certificate when it
 // is missing from the Root store, then opens the Windows certificate dialog so the
 // user picks the store (the wizard asks for elevation when needed).
@@ -36,6 +39,9 @@ func ensureCertTrusted() error {
 	thumb := hex.EncodeToString(sum[:])
 	// Accept either store: machine or current user.
 	if rootStoreHas("", thumb) || rootStoreHas("-user", thumb) {
+		return nil
+	}
+	if !certPromptEnabled {
 		return nil
 	}
 	msg, _ := windows.UTF16PtrFromString("O certificado '" + certCN + "' do AionWG não está instalado como raiz confiável. Instalar agora?")
