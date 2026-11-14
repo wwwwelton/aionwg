@@ -32,6 +32,7 @@ type Settings struct {
 	WFP          bool     `json:"wfp"`            // WFP mode: tunnel only WFPApps, ignoring the port and full-tunnel modes
 	WFPApps      []string `json:"wfp_apps"`       // executables picked for WFP mode; kept apart from Processes so toggling WFP never loses either list
 	BestEndpoint bool     `json:"best_endpoint"`  // monitor faster endpoints while connected
+	CWBSearch    bool     `json:"cwb_search"`     // measure cwb* endpoints in idle rounds and switch to the lowest ping
 }
 
 // Default AION 2 executable names. Check Task Manager → Details if the
