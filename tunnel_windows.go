@@ -389,7 +389,7 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 	// system table if the SOCKET layer cannot open; it never blocks the tunnel.
 	table := newWFPTable()
 	table.SetApps(opt.WFPApps)
-	e.wfp = startWFPMonitor(table, logf)
+	e.wfp = startWFPMonitor(table, &e.access, logf)
 	e.wfpOn.Store(opt.WFP)
 	e.tun = newSplitTun(conf.MTU)
 	e.tun.onInbound = e.handleInbound

@@ -180,6 +180,33 @@ func TestDecodeSocketEventIgnoresWhatItCannotTrust(t *testing.T) {
 	}
 }
 
+// withRemote sets the RemoteAddr (IPv4-mapped) and RemotePort of a raw socket event.
+func withRemote(raw []byte, ip [4]byte, port uint16) []byte {
+	copy(raw[wdSockRemoteIP+10:], []byte{0xff, 0xff})
+	copy(raw[wdSockRemoteIP+12:], ip[:])
+	raw[wdSockRemotePt], raw[wdSockRemotePt+1] = byte(port), byte(port>>8)
+	return raw
+}
+
+func TestLoopbackConnectIsLogged(t *testing.T) {
+	cases := []struct {
+		name   string
+		raw    []byte
+		remote string
+		want   bool
+	}{
+		{"loopback connect", withRemote(sockAddr(wdEventSocketConnect, 4242, 51000, protoTCP), [4]byte{127, 0, 0, 1}, 3000), "127.0.0.1:3000", true},
+		{"remote connect", withRemote(sockAddr(wdEventSocketConnect, 4242, 51000, protoTCP), [4]byte{93, 184, 216, 34}, 443), "93.184.216.34:443", false},
+		{"loopback bind", withRemote(sockAddr(wdEventSocketBind, 4242, 51000, protoTCP), [4]byte{127, 0, 0, 1}, 3000), "127.0.0.1:3000", false},
+	}
+	for _, c := range cases {
+		ev, ok := decodeSocketEvent(c.raw)
+		if !ok || ev.remote.String() != c.remote || ev.loopbackConnect() != c.want {
+			t.Errorf("%s: ok=%v remote=%v loopbackConnect=%v", c.name, ok, ev.remote, ev.loopbackConnect())
+		}
+	}
+}
+
 func TestWFPApplyBindThenClose(t *testing.T) {
 	tb := newTestTable()
 	conn, _ := decodeSocketEvent(sockAddr(wdEventSocketConnect, 11, 52000, protoTCP))

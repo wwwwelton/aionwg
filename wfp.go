@@ -7,6 +7,7 @@ package main
 // default mode relies on.
 
 import (
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -201,16 +202,19 @@ const (
 	wdAddrSize     = 80
 	wdAddrUnion    = 16
 	wdSockPID      = wdAddrUnion + 16 // after EndpointId and ParentEndpointId
-	wdSockLocalprt = wdSockPID + 4 + 16 + 16
+	wdSockLocalprt = wdSockRemoteIP + 16
+	wdSockRemotePt = wdSockLocalprt + 2
 	wdSockProto    = wdSockLocalprt + 4
+	wdSockRemoteIP = wdSockPID + 4 + 16 // RemoteAddr follows LocalAddr; IPv4 is IPv4-mapped
 )
 
 // wfpEvent is one decoded SOCKET layer event.
 type wfpEvent struct {
-	event uint8
-	pid   uint32
-	port  uint16
-	proto uint8
+	event  uint8
+	pid    uint32
+	port   uint16
+	proto  uint8
+	remote netip.AddrPort // connect events only: the socket's far end
 }
 
 // decodeSocketEvent reads a raw WINDIVERT_ADDRESS. ok is false for events and
@@ -229,10 +233,19 @@ func decodeSocketEvent(raw []byte) (ev wfpEvent, ok bool) {
 		uint32(raw[wdSockPID+2])<<16 | uint32(raw[wdSockPID+3])<<24
 	ev.port = uint16(raw[wdSockLocalprt]) | uint16(raw[wdSockLocalprt+1])<<8
 	ev.proto = raw[wdSockProto]
+	var ip [16]byte
+	copy(ip[:], raw[wdSockRemoteIP:])
+	ev.remote = netip.AddrPortFrom(netip.AddrFrom16(ip).Unmap(), uint16(raw[wdSockRemotePt])|uint16(raw[wdSockRemotePt+1])<<8)
 	if ev.proto != protoTCP && ev.proto != protoUDP || ev.port == 0 || ev.pid == 0 {
 		return ev, false
 	}
 	return ev, true
+}
+
+// loopbackConnect reports a connect to 127.0.0.0/8 or ::1. The packet capture
+// never sees loopback traffic, so the access log takes these from SOCKET events.
+func (ev wfpEvent) loopbackConnect() bool {
+	return ev.event == wdEventSocketConnect && ev.remote.Addr().IsLoopback()
 }
 
 // Apply updates the table from one event.
