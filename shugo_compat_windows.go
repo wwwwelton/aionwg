@@ -47,25 +47,27 @@ func shugoNamedModule(pid uint32, name string) (windows.ModuleEntry32, error) {
 	return shugoModules(pid, func(m windows.ModuleEntry32) bool { return strings.EqualFold(windows.UTF16ToString(m.Module[:]), name) })
 }
 
-func shugoRemoteCall(process windows.Handle, function, argument uintptr) (uint32, error) {
+// shugoRemoteCall runs function(argument) in the target. started reports that
+// the remote thread exists: after that, an error (timeout) means it may still
+// be running, so the caller must not assume the call had no effect.
+func shugoRemoteCall(process windows.Handle, function, argument uintptr) (code uint32, started bool, err error) {
 	h, _, err := shugoCreateThread.Call(uintptr(process), 0, 0, function, argument, 0, 0)
 	if h == 0 {
-		return 0, err
+		return 0, false, err
 	}
 	defer windows.CloseHandle(windows.Handle(h))
 	result, err := windows.WaitForSingleObject(windows.Handle(h), 5000)
 	if err != nil {
-		return 0, err
+		return 0, true, err
 	}
 	if result != windows.WAIT_OBJECT_0 {
-		return 0, fmt.Errorf("remote thread wait: %d (thread may still be running)", result)
+		return 0, true, fmt.Errorf("remote thread wait: %d (thread may still be running)", result)
 	}
-	var code uint32
 	ok, _, err := shugoThreadResult.Call(h, uintptr(unsafe.Pointer(&code)))
 	if ok == 0 {
-		return 0, err
+		return 0, true, err
 	}
-	return code, nil
+	return code, true, nil
 }
 
 func shugoLoadRemote(process windows.Handle, pid uint32, path string) error {
@@ -94,9 +96,10 @@ func shugoLoadRemote(process windows.Handle, pid uint32, path string) error {
 		shugoFree.Call(uintptr(process), memory, 0, windows.MEM_RELEASE)
 		return err
 	}
-	_, err = shugoRemoteCall(process, remoteOwner.ModBaseAddr+address-owner.ModBaseAddr, memory)
-	// On timeout the remote loader can still be reading its argument; keep that allocation alive.
-	if err == nil {
+	_, started, err := shugoRemoteCall(process, remoteOwner.ModBaseAddr+address-owner.ModBaseAddr, memory)
+	// On timeout the remote loader can still be reading its argument; keep that
+	// allocation alive. If the thread never started nothing can read it.
+	if err == nil || !started {
 		shugoFree.Call(uintptr(process), memory, 0, windows.MEM_RELEASE)
 	}
 	if err != nil {
@@ -151,7 +154,7 @@ func (t *shugoTarget) disable(logf func(string, ...any)) error {
 	if result == windows.WAIT_OBJECT_0 {
 		return nil
 	}
-	code, err := shugoRemoteCall(t.process, t.base+t.stop, 0)
+	code, _, err := shugoRemoteCall(t.process, t.base+t.stop, 0)
 	if err != nil || code != 0 {
 		return fmt.Errorf("Shugo PID %d: restore failed: code=%d error=%v", t.pid, code, err)
 	}
@@ -166,10 +169,19 @@ type shugoCompat struct {
 	done chan struct{}
 }
 
-func startShugoCompat(logf func(string, ...any)) *shugoCompat {
+// startShugoCompat starts the supervisor; after (may be nil) is the previous
+// supervisor's done channel: its restore must finish before this one hooks.
+func startShugoCompat(logf func(string, ...any), after <-chan struct{}) *shugoCompat {
 	c := &shugoCompat{stop: make(chan struct{}), done: make(chan struct{})}
 	go func() {
 		defer close(c.done)
+		if after != nil {
+			select {
+			case <-after:
+			case <-c.stop:
+				return
+			}
+		}
 		if err := c.run(logf); err != nil {
 			logf("Shugo: %v", err)
 		}
@@ -208,19 +220,36 @@ func (c *shugoCompat) run(logf func(string, ...any)) (resultErr error) {
 	}()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	snapshotFailed := false
 	for {
 		pids, err := shugoProcessIDs()
 		if err != nil {
-			return err
+			if !snapshotFailed {
+				logf("Shugo: lista de processos indisponível (%v); tentando de novo", err)
+				snapshotFailed = true
+			}
+			select {
+			case <-c.stop:
+				return nil
+			case <-ticker.C:
+			}
+			continue
 		}
+		snapshotFailed = false
 		live := map[uint32]bool{}
 		for _, pid := range pids {
 			live[pid] = true
 			if t := active[pid]; t != nil {
 				if !t.reported {
-					count, err := shugoRemoteCall(t.process, t.base+t.status, 0)
+					count, _, err := shugoRemoteCall(t.process, t.base+t.status, 0)
 					if err != nil {
-						return err
+						logf("Shugo PID %d: status falhou (%v); desativando este alvo", pid, err)
+						if derr := t.disable(logf); derr != nil {
+							logf("Shugo PID %d: %v", pid, derr)
+						}
+						delete(active, pid)
+						failed[pid] = true
+						continue
 					}
 					if count > 0 {
 						logf("Shugo PID %d: par de conexão do jogo/espelho apresentado (%d)", pid, count)
@@ -256,7 +285,13 @@ func (c *shugoCompat) run(logf func(string, ...any)) (resultErr error) {
 				return fmt.Errorf("o Shugo tem outra DLL de compatibilidade carregada; reinicie o Shugo")
 			}
 			t.base, t.stop, t.status = module.ModBaseAddr, offsets["AionWGCompatStop"], offsets["AionWGCompatStatus"]
-			code, err := shugoRemoteCall(t.process, t.base+offsets["AionWGCompatStart"], 0)
+			code, started, err := shugoRemoteCall(t.process, t.base+offsets["AionWGCompatStart"], 0)
+			if started && err != nil {
+				// The loader may still finish Start: keep the target so exit/disable runs the idempotent Stop.
+				logf("Shugo PID %d: ativação sem resposta (%v); será desfeita ao sair", pid, err)
+				active[pid] = t
+				continue
+			}
 			if err != nil || code != 0 {
 				windows.CloseHandle(t.process)
 				logf("Shugo PID %d: falha ao ativar: code=%d error=%v", pid, code, err)

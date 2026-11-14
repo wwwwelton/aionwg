@@ -160,7 +160,8 @@ type Engine struct {
 	owner        *ownerTracker
 	mirror       *mirror
 	shugoMu      sync.Mutex
-	shugo        *shugoCompat // Shugo.gg relay view; exists only while [m] is on
+	shugo        *shugoCompat  // Shugo.gg relay view; exists only while [m] is on
+	shugoOld     chan struct{} // done of the last supervisor being stopped in the background
 	udpDup       *udpDuplicator[divertAddress]
 	udpForce     atomic.Bool
 	latestOut    atomic.Bool
@@ -402,13 +403,13 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 		e.wg.Add(1)
 		go e.divertLoop()
 	}
-	e.wg.Add(3)
-	go e.housekeeping()
-	go e.pingLoop()
-	go e.traceLoop()
+	for _, loop := range []func(){e.housekeeping, e.pingLoop, e.traceLoop} {
+		e.wg.Add(1)
+		go func() { defer e.wg.Done(); loop() }()
+	}
 	if opt.BestEndpoint {
 		e.wg.Add(1)
-		go e.routeLoop()
+		go func() { defer e.wg.Done(); e.routeLoop() }()
 	}
 	e.wg.Add(3)
 	go e.runUDPDuplicateWorker()
@@ -747,7 +748,6 @@ func (e *Engine) relayICMPError(pkt []byte, p *pktInfo) {
 }
 
 func (e *Engine) housekeeping() {
-	defer e.wg.Done()
 	tk := time.NewTicker(30 * time.Second)
 	defer tk.Stop()
 	// The health snapshot goes to the file log so a drop can be read afterwards.
@@ -824,7 +824,6 @@ func (e *Engine) gameServer() netip.Addr {
 }
 
 func (e *Engine) pingLoop() {
-	defer e.wg.Done()
 	icmp, _ := newIcmpPinger()
 	if icmp != nil {
 		defer icmp.close()
@@ -1068,14 +1067,27 @@ func (e *Engine) SetMirror(on bool) {
 
 // setShugo makes the mirror act as a relay for Shugo.gg: the compatibility
 // layer exists exactly while [m] is on and is restored when it is turned off.
+// The stop runs in the background (it can wait seconds per target) so the UI
+// goroutine never blocks; Close waits for it, and a re-enable waits for it too.
 func (e *Engine) setShugo(on bool) {
 	e.shugoMu.Lock()
 	defer e.shugoMu.Unlock()
 	if on && e.shugo == nil && !e.closing.Load() {
-		e.shugo = startShugoCompat(e.logDisk)
+		e.shugo = startShugoCompat(e.logDisk, e.shugoOld)
 	} else if !on && e.shugo != nil {
-		e.shugo.Close()
-		e.shugo = nil
+		old := e.shugo
+		e.shugo, e.shugoOld = nil, old.done
+		go old.Close()
+	}
+}
+
+// waitShugo blocks until a background shugo stop has restored the hooks.
+func (e *Engine) waitShugo() {
+	e.shugoMu.Lock()
+	old := e.shugoOld
+	e.shugoMu.Unlock()
+	if old != nil {
+		<-old
 	}
 }
 
@@ -1300,6 +1312,7 @@ func (e *Engine) Close() {
 		e.wfp.Close()
 	}
 	e.setShugo(false)
+	e.waitShugo()
 	if e.mirror != nil {
 		e.mirror.Close()
 	}
@@ -1524,7 +1537,6 @@ func (e *Engine) nap(d time.Duration) bool {
 // game has traffic, spaces attempts out, and keeps a switch only if the game
 // ping measured through the new path is better.
 func (e *Engine) routeLoop() {
-	defer e.wg.Done()
 	tk := time.NewTicker(routeEvery)
 	defer tk.Stop()
 	var next time.Time
@@ -1753,7 +1765,6 @@ func (e *Engine) runTrace() {
 // traceLoop refreshes the route view shortly after connecting, every 45 s and
 // whenever the endpoint changes.
 func (e *Engine) traceLoop() {
-	defer e.wg.Done()
 	tk := time.NewTicker(45 * time.Second)
 	defer tk.Stop()
 	first := time.After(4 * time.Second)
