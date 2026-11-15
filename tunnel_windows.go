@@ -217,6 +217,8 @@ type Engine struct {
 
 	up, down                                   atomic.Uint64
 	gameUp, gameDown                           atomic.Uint64
+	wgRxBytes, wgTxBytes                       atomic.Uint64
+	wgHandshake                                atomic.Int64
 	full                                       atomic.Bool
 	noDNS                                      atomic.Bool
 	wfpOn                                      atomic.Bool // WFP mode: only the selected apps are tunnelled
@@ -432,6 +434,8 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 			}
 		}
 	}
+	e.wg.Add(1)
+	go e.wgStatsLoop()
 	if err := e.startUDPPaths(opt.WarpMultipath); err != nil {
 		e.Close()
 		return nil, err
@@ -1035,12 +1039,64 @@ func (e *Engine) pingReply(id, seq uint16) {
 
 // ---------------------------------------------------------------- stats / close
 
+func (e *Engine) wgStatsLoop() {
+	defer e.wg.Done()
+	tk := time.NewTicker(time.Second)
+	defer tk.Stop()
+	for {
+		select {
+		case <-e.stop:
+			return
+		case <-tk.C:
+		}
+		devices := [maxPaths]*device.Device{e.dev}
+		for i, path := range e.paths {
+			if path != nil {
+				devices[i+1] = path.dev
+			}
+		}
+		var rx, tx uint64
+		var handshake int64
+		for _, dev := range devices {
+			if dev == nil {
+				continue
+			}
+			uapi, err := dev.IpcGet()
+			if err != nil {
+				continue
+			}
+			sc := bufio.NewScanner(strings.NewReader(uapi))
+			for sc.Scan() {
+				k, v, _ := strings.Cut(sc.Text(), "=")
+				n, _ := strconv.ParseInt(v, 10, 64)
+				switch k {
+				case "rx_bytes":
+					rx += uint64(n)
+				case "tx_bytes":
+					tx += uint64(n)
+				case "last_handshake_time_sec":
+					if n > 0 && n > handshake {
+						handshake = n
+					}
+				}
+			}
+		}
+		e.wgRxBytes.Store(rx)
+		e.wgTxBytes.Store(tx)
+		if handshake > 0 {
+			e.wgHandshake.Store(time.Unix(handshake, 0).UnixNano())
+		}
+	}
+}
+
 func (e *Engine) Stats() Stats {
 	s := Stats{
 		Up:                     e.up.Load(),
 		Down:                   e.down.Load(),
 		GameUp:                 e.gameUp.Load(),
 		GameDown:               e.gameDown.Load(),
+		WGRx:                   e.wgRxBytes.Load(),
+		WGTx:                   e.wgTxBytes.Load(),
 		FullTunnel:             e.full.Load(),
 		Procs:                  e.owner.Processes(),
 		Endpoint:               e.eps()[0].String(),
@@ -1050,6 +1106,9 @@ func (e *Engine) Stats() Stats {
 		WireGuardActive:        e.dev != nil,
 		RouteApplied:           e.h != 0 && e.dev != nil,
 		ForwardingActive:       e.h != 0 && e.dev != nil && e.tun != nil,
+	}
+	if n := e.wgHandshake.Load(); n > 0 {
+		s.Handshake = time.Unix(0, n)
 	}
 	s.Paths = append(s.Paths, udpPathStatus{Endpoint: e.eps()[0]})
 	for _, path := range e.paths {
@@ -1170,37 +1229,6 @@ func (e *Engine) Stats() Stats {
 	s.DestinationReachable = s.PingGame.OK
 	s.Paths[0].Active = s.PingTunnel.OK
 
-	devices := [maxPaths]*device.Device{e.dev}
-	for i, path := range e.paths {
-		if path != nil {
-			devices[i+1] = path.dev
-		}
-	}
-	for _, dev := range devices {
-		if dev == nil {
-			continue
-		}
-		if uapi, err := dev.IpcGet(); err == nil {
-			sc := bufio.NewScanner(strings.NewReader(uapi))
-			for sc.Scan() {
-				k, v, _ := strings.Cut(sc.Text(), "=")
-				n, _ := strconv.ParseInt(v, 10, 64)
-				switch k {
-				case "rx_bytes":
-					s.WGRx += uint64(n)
-				case "tx_bytes":
-					s.WGTx += uint64(n)
-				case "last_handshake_time_sec":
-					if n > 0 {
-						t := time.Unix(n, 0)
-						if t.After(s.Handshake) {
-							s.Handshake = t
-						}
-					}
-				}
-			}
-		}
-	}
 	s.HandshakeValid = !s.Handshake.IsZero() && time.Since(s.Handshake) < 3*time.Minute
 	return s
 }
