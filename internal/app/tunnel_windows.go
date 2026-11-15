@@ -2030,7 +2030,16 @@ func (e *Engine) discoverIdle() {
 	r := ranked[0]
 	if probeHandshake(e.conf, p, r.AddrPort, 2*time.Second) {
 		e.learn(r.AddrPort)
-		e.routeLog("rota: novo endpoint aprendido %s (perna direta %v contra %v); o monitor passa a considerá-lo", r.Addr(), r.RTT, curRTT)
+		// The handshake was proven on a throwaway device, so switching is safe
+		// now; SetEndpoint still confirms it live and reverts on failure.
+		if _, ok := pickRoute(curRTT, map[netip.AddrPort]time.Duration{r.AddrPort: r.RTT}); ok && !e.gameServer().IsValid() {
+			e.routeLog("rota: handshake de teste ok em %s (perna direta %v contra %v); trocando", r.AddrPort, r.RTT, curRTT)
+			if err := e.SetEndpoint(r.AddrPort); err != nil {
+				e.routeLog("rota: troca para %s falhou (%v); mantendo %s", r.AddrPort, err, cur)
+			}
+			return
+		}
+		e.routeLog("rota: novo endpoint aprendido %s (perna direta %v contra %v); handshake ok, sem ganho suficiente para trocar", r.Addr(), r.RTT, curRTT)
 		return
 	}
 	_ = saveBad(routesPath(), e.profile, r.AddrPort, time.Now())

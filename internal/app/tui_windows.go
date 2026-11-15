@@ -919,7 +919,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.settings.BestEndpoint = !m.settings.BestEndpoint
 			_ = saveSettings(m.settings)
 			if m.settings.BestEndpoint {
-				m.log("Melhor endpoint LIGADO — procura novos endpoints só com o jogo parado; nunca troca de rota durante a partida")
+				m.log("Melhor endpoint LIGADO — testa endpoints em separado (handshake de teste) com o jogo parado e só troca de rota se o teste passar; nunca troca durante a partida")
 			} else {
 				m.log("Melhor endpoint DESLIGADO — usa o endpoint da config; [v] continua disponível para troca manual")
 			}
