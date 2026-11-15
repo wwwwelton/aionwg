@@ -163,7 +163,7 @@ try {
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
     try {
         Copy-Item -LiteralPath $exe -Destination $stage
-        $assetNames = @('WinDivert.dll','WinDivert64.sys','wintun.dll','WinDivert-LICENSE.txt','shugo-compat.dll')
+        $assetNames = @('LICENSE','WinDivert.dll','WinDivert64.sys','wintun.dll','WinDivert-LICENSE.txt','shugo-compat.dll')
         $assetFolders = @($AssetsDir, $SourceDir, $dist, $PSScriptRoot)
         if ($AssetsZip) {
             Add-Type -AssemblyName System.IO.Compression
