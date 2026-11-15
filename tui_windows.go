@@ -236,10 +236,31 @@ func (m model) backendLabel() string {
 	if m.eng == nil {
 		return sDim.Render("não conectado")
 	}
+	if m.stats.Backend != "" {
+		col := cYellow
+		if m.stats.WFPOn {
+			col = cGreen
+		}
+		return lipgloss.NewStyle().Foreground(col).Render(m.stats.Backend)
+	}
 	if m.stats.WFPOn {
 		return lipgloss.NewStyle().Foreground(cGreen).Render("Hybrid · WFP SOCKET + WinDivert NETWORK")
 	}
 	return lipgloss.NewStyle().Foreground(cYellow).Render("Legacy · WinDivert NETWORK")
+}
+
+func stateValue(ok bool) string {
+	if ok {
+		return lipgloss.NewStyle().Foreground(cGreen).Render("ativo")
+	}
+	return lipgloss.NewStyle().Foreground(cYellow).Render("inativo")
+}
+
+func stateSummary(s Stats) string {
+	return fmt.Sprintf("driver %s · interceptação %s · interface %s · WG %s · handshake %s · rota %s · forward %s · túnel %s · destino %s",
+		stateValue(s.DriverLoaded), stateValue(s.InterceptorActive), stateValue(s.VirtualInterfaceActive),
+		stateValue(s.WireGuardActive), stateValue(s.HandshakeValid), stateValue(s.RouteApplied),
+		stateValue(s.ForwardingActive), stateValue(s.TunnelReachable), stateValue(s.DestinationReachable))
 }
 
 func (m model) moduleLines() []string {
@@ -287,7 +308,13 @@ func (m model) moduleLines() []string {
 		}
 		return []string{
 			row("Backend", m.backendLabel()),
-			row("Driver nativo", sDim.Render("não implementado nesta build")),
+			row("Native WFP", sDim.Render("não implementado nesta build")),
+			row("Driver", stateValue(s.DriverLoaded)+" · WinDivert"),
+			row("Interceptação", stateValue(s.InterceptorActive)),
+			row("Interface", stateValue(s.VirtualInterfaceActive)),
+			row("WireGuard", stateValue(s.WireGuardActive)),
+			row("Handshake", stateValue(s.HandshakeValid)),
+			row("Rota/forward", stateValue(s.RouteApplied)+" / "+stateValue(s.ForwardingActive)),
 			row("SOCKET/ALE", socket),
 			row("Processos", fmt.Sprintf("%d selecionados · %d fluxos", len(m.settings.WFPApps), s.GameFlows)),
 			row("Ação", sDim.Render("[w] alternar · [l] selecionar apps")),
@@ -1354,6 +1381,9 @@ func (m model) render(level int) string {
 			row("Endpoint", s.Endpoint+sDim.Render("   túnel ")+s.TunnelAddr+sDim.Render("   [v] troca")),
 			row("Saída", exitStatus(s.Exit)),
 		)
+		if level < 3 {
+			stat = append(stat, row("Backend", m.backendLabel()), row("Estados", stateSummary(s)))
+		}
 		if level < 3 || len(s.Paths) <= 1 {
 			stat = append(stat, row("Handshake", hs))
 		}

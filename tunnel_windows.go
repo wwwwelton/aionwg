@@ -113,51 +113,60 @@ type PingResult struct {
 }
 
 type Stats struct {
-	Up, Down         uint64 // all bytes through the tunnel (inner)
-	GameUp, GameDown uint64 // game-only bytes
-	WGRx, WGTx       uint64 // WireGuard wire bytes
-	Handshake        time.Time
-	Flows            int
-	GameFlows        int
-	Procs            []ProcInfo
-	PingEndpoint     PingResult // direct ICMP to VPN server (outside the tunnel)
-	PingTunnel       PingResult // ICMP through the tunnel to the gateway
-	PingGame         PingResult // ICMP through the tunnel to the game server
-	PingGameDirect   PingResult // ICMP straight to the game server, outside the tunnel
-	MirrorOn         bool
-	UDPDupOn         bool   // worker enabled; active only in split-tunnel mode
-	UDPOriginals     int    // A of the A:B ratio
-	UDPCopies        int    // B of the A:B ratio
-	UDPForce         bool   // duplicate game UDP outside AllowedIPs
-	UDPNewestOut     bool   // latest-first primary game UDP send
-	UDPNewestIn      bool   // latest-first primary game UDP arrival
-	UDPSendDropped   uint64 // oldest outbound UDP packets evicted from LIFO queue
-	UDPRecvDropped   uint64 // oldest inbound UDP packets evicted from LIFO queue
-	UDPDupAccepted   uint64 // copies queued
-	UDPDupSent       uint64 // copies reinjected to Windows
-	UDPDupDropped    uint64 // copies dropped rather than slowing the original
-	UDPDupErrors     uint64 // secondary path errors
-	MirrorFlows      []string
-	MirrorAck        MirrorRTT // ACK round trip of the game TCP as seen by the mirror
-	MirrorResp       MirrorRTT // request -> first reply payload (application level)
-	MeterAdapter     string
-	MeterOK          bool
-	FullTunnel       bool
-	DNS              string // DNS used for the full tunnel ("" = none in config)
-	IPv6Direct       bool   // full tunnel but config has no IPv6 address
-	WFPOn            bool   // WFP mode: only the selected apps are tunnelled
-	WFPSocket        bool   // SOCKET layer open (false = system-table fallback only)
-	DNSTunnel        bool   // DNS redirect active
-	Diag             Diag
-	Endpoint         string
-	TunnelAddr       string
-	Route            RouteTrace // latest traceroute of the route in use
-	RouteMonitor     bool       // best-endpoint option active for this connection
-	RouteNote        string     // last route monitor / endpoint switch message
-	Exit             ExitInfo   // where the tunnel exits (zero until measured)
-	Paths            []udpPathStatus
+	Up, Down               uint64 // all bytes through the tunnel (inner)
+	GameUp, GameDown       uint64 // game-only bytes
+	WGRx, WGTx             uint64 // WireGuard wire bytes
+	Handshake              time.Time
+	Flows                  int
+	GameFlows              int
+	Procs                  []ProcInfo
+	PingEndpoint           PingResult // direct ICMP to VPN server (outside the tunnel)
+	PingTunnel             PingResult // ICMP through the tunnel to the gateway
+	PingGame               PingResult // ICMP through the tunnel to the game server
+	PingGameDirect         PingResult // ICMP straight to the game server, outside the tunnel
+	MirrorOn               bool
+	UDPDupOn               bool   // worker enabled; active only in split-tunnel mode
+	UDPOriginals           int    // A of the A:B ratio
+	UDPCopies              int    // B of the A:B ratio
+	UDPForce               bool   // duplicate game UDP outside AllowedIPs
+	UDPNewestOut           bool   // latest-first primary game UDP send
+	UDPNewestIn            bool   // latest-first primary game UDP arrival
+	UDPSendDropped         uint64 // oldest outbound UDP packets evicted from LIFO queue
+	UDPRecvDropped         uint64 // oldest inbound UDP packets evicted from LIFO queue
+	UDPDupAccepted         uint64 // copies queued
+	UDPDupSent             uint64 // copies reinjected to Windows
+	UDPDupDropped          uint64 // copies dropped rather than slowing the original
+	UDPDupErrors           uint64 // secondary path errors
+	MirrorFlows            []string
+	MirrorAck              MirrorRTT // ACK round trip of the game TCP as seen by the mirror
+	MirrorResp             MirrorRTT // request -> first reply payload (application level)
+	MeterAdapter           string
+	MeterOK                bool
+	FullTunnel             bool
+	DNS                    string // DNS used for the full tunnel ("" = none in config)
+	IPv6Direct             bool   // full tunnel but config has no IPv6 address
+	WFPOn                  bool   // WFP mode: only the selected apps are tunnelled
+	WFPSocket              bool   // SOCKET layer open (false = system-table fallback only)
+	DNSTunnel              bool   // DNS redirect active
+	Diag                   Diag
+	Endpoint               string
+	TunnelAddr             string
+	Route                  RouteTrace // latest traceroute of the route in use
+	RouteMonitor           bool       // best-endpoint option active for this connection
+	RouteNote              string     // last route monitor / endpoint switch message
+	Exit                   ExitInfo   // where the tunnel exits (zero until measured)
+	Paths                  []udpPathStatus
+	Backend                string
+	DriverLoaded           bool
+	InterceptorActive      bool
+	VirtualInterfaceActive bool
+	WireGuardActive        bool
+	HandshakeValid         bool
+	RouteApplied           bool
+	ForwardingActive       bool
+	TunnelReachable        bool
+	DestinationReachable   bool
 }
-
 type outboundUDPJob struct {
 	packet  []byte // original routed packet, already SNAT'd for WireGuard
 	copyUDP []byte // optional copy of packet for the secondary (duplicate) send
@@ -1028,13 +1037,19 @@ func (e *Engine) pingReply(id, seq uint16) {
 
 func (e *Engine) Stats() Stats {
 	s := Stats{
-		Up:         e.up.Load(),
-		Down:       e.down.Load(),
-		GameUp:     e.gameUp.Load(),
-		GameDown:   e.gameDown.Load(),
-		FullTunnel: e.full.Load(),
-		Procs:      e.owner.Processes(),
-		Endpoint:   e.eps()[0].String(),
+		Up:                     e.up.Load(),
+		Down:                   e.down.Load(),
+		GameUp:                 e.gameUp.Load(),
+		GameDown:               e.gameDown.Load(),
+		FullTunnel:             e.full.Load(),
+		Procs:                  e.owner.Processes(),
+		Endpoint:               e.eps()[0].String(),
+		DriverLoaded:           e.h != 0,
+		InterceptorActive:      e.h != 0,
+		VirtualInterfaceActive: e.tun != nil,
+		WireGuardActive:        e.dev != nil,
+		RouteApplied:           e.h != 0 && e.dev != nil,
+		ForwardingActive:       e.h != 0 && e.dev != nil && e.tun != nil,
 	}
 	s.Paths = append(s.Paths, udpPathStatus{Endpoint: e.eps()[0]})
 	for _, path := range e.paths {
@@ -1076,6 +1091,10 @@ func (e *Engine) Stats() Stats {
 	wfpOn := e.wfpOn.Load() && e.wfp != nil
 	s.WFPOn = wfpOn
 	s.WFPSocket = e.wfp != nil && e.wfp.h != 0
+	s.Backend = "Legacy WinDivert NETWORK"
+	if wfpOn {
+		s.Backend = "Hybrid WFP SOCKET + WinDivert NETWORK"
+	}
 	// WFP replaces the full tunnel, so it must not be reported while it is on.
 	s.FullTunnel = s.FullTunnel && !wfpOn
 	if wfpOn {
@@ -1147,6 +1166,8 @@ func (e *Engine) Stats() Stats {
 		s.PingGameDirect = ps.result()
 	}
 	e.pingMu.Unlock()
+	s.TunnelReachable = s.PingTunnel.OK
+	s.DestinationReachable = s.PingGame.OK
 	s.Paths[0].Active = s.PingTunnel.OK
 
 	devices := [maxPaths]*device.Device{e.dev}
@@ -1180,6 +1201,7 @@ func (e *Engine) Stats() Stats {
 			}
 		}
 	}
+	s.HandshakeValid = !s.Handshake.IsZero() && time.Since(s.Handshake) < 3*time.Minute
 	return s
 }
 
