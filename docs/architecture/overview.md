@@ -5,7 +5,7 @@
 ```mermaid
 flowchart TD
     U[Windows user] --> TUI[Bubble Tea TUI]
-    TUI --> APP[Root main package\napplication lifecycle]
+    TUI --> APP[internal/app\napplication lifecycle]
     APP --> CFG[Settings and WireGuard parser]
     APP --> POL[Process ownership and policy]
     APP --> WFP[WFP policy/monitoring]
@@ -19,46 +19,39 @@ flowchart TD
     TUN --> VPN[WireGuard or WARP-compatible peer]
 ```
 
-The repository is currently one root `main` package. That is deliberate technical debt: Windows-specific files and the packet path share many concrete types, and moving them in one operation would make behavior changes difficult to review. The existing `internal/runtimefiles` and `internal/tlscert` packages already isolate runtime extraction and the public signing certificate.
+The executable entrypoint is now `cmd/aionwg`, which calls `internal/app.Run`. The root `main.go` remains a compatibility launcher for existing `go build .` workflows. The Windows packet path stays in `internal/app` for now because it shares concrete hot-path types; `internal/route`, `internal/runtimefiles` and `internal/tlscert` are isolated packages.
 
 ## Proposed dependency direction
 
 ```mermaid
 flowchart LR
-    CMD[cmd/aionwg\nfuture entrypoint] --> APP2[internal/app]
-    APP2 --> TUI2[internal/tui]
-    APP2 --> CONFIG[internal/config]
-    APP2 --> POLICY[internal/policy]
-    APP2 --> CAPTURE[internal/capture/windivert]
-    APP2 --> PACKET2[internal/packet]
-    APP2 --> TUNNEL[internal/tunnel]
+    CMD[cmd/aionwg] --> APP2[internal/app]
     APP2 --> ROUTE2[internal/route]
-    APP2 --> WARP[internal/warp]
     APP2 --> TELEMETRY[internal/telemetry]
-    CAPTURE --> PACKET2
-    PACKET2 --> TUNNEL
-    POLICY --> WFP2[internal/wfp]
+    APP2 --> RUNTIME[internal/runtimefiles]
+    APP2 --> CERT[internal/tlscert]
 ```
 
-This graph is a migration target, not a claim that all packages already exist.
+The application lifecycle and all Windows build-tagged runtime code now live in `internal/app`. Further decomposition into packet, capture, policy and TUI packages remains a separate behavior-preserving step.
 
 ## Source-to-destination migration map
 
 | Current path | Target | Status | Risk and reason |
 |---|---|---|---|
-| `main_windows.go`, `main_other.go` | `cmd/aionwg` | Deferred | Moving `package main` requires an application composition boundary. Preserve entrypoint until dependencies are extracted. |
-| `tui_windows.go`, endpoint picker files | `internal/tui` | Deferred | TUI currently calls concrete engine/settings functions. Extract commands and state before moving views. |
-| `store.go`, `config.go` | `internal/config` | Deferred | JSON compatibility and private-key handling need contract tests before package move. |
-| `wfp.go`, `owner_windows.go` | `internal/process`, `internal/policy` | Deferred | Process ownership and packet classification currently share types and Windows fallbacks. |
-| `divert_windows.go` | `internal/capture/windivert` | Deferred | Capture handles and address ABI must move without changing filters or reinjection. |
-| `packet.go`, `splittun.go`, UDP files | `internal/packet`, `internal/tunnel` | Deferred | Hot path and buffer ownership need benchmarks and package-level interfaces first. |
-| `native_wfp*.go` | `internal/wfp` | Deferred | Current user-mode policy engine is functional but coupled to `Engine` lifecycle. |
-| `route_compare.go` | `internal/route` | Complete | Ranking primitives are isolated; Windows measurement adapters remain in the root until the engine lifecycle is extracted. |
+| `main_windows.go`, `main_other.go` | `cmd/aionwg`, `internal/app/entry_*.go` | Complete | `cmd/aionwg` is the canonical executable; root `main.go` preserves the legacy build command. |
+| Root Go runtime files | `internal/app` | Complete | Mechanical package move; tests, Windows build tags and embedded asset paths were preserved. |
+| `tui_windows.go`, endpoint picker files | `internal/tui` | Deferred | They now live in `internal/app`; split only after command and engine contracts are extracted. |
+| `store.go`, `config.go` | `internal/config` | Deferred | JSON compatibility and private-key handling still need a narrower package boundary. |
+| `wfp.go`, `owner_windows.go` | `internal/process`, `internal/policy` | Deferred | Process ownership and packet classification still share concrete engine types. |
+| `divert_windows.go` | `internal/capture/windivert` | Deferred | Capture handles and address ABI need a behavior-preserving extraction. |
+| `packet.go`, `splittun.go`, UDP files | `internal/packet`, `internal/tunnel` | Deferred | Hot path and buffer ownership need package-level interfaces and benchmarks. |
+| `native_wfp*.go` | `internal/wfp` | Deferred | User-mode policy remains coupled to `Engine` lifecycle. |
+| `route_compare.go` | `internal/route` | Complete | Ranking primitives are isolated; the compatibility facade remains in `internal/app`. |
 | `bestendpoint.go`, `routemon.go`, `paths*.go` | `internal/route`, `internal/warp` | Deferred | Endpoint persistence and WARP multipath remain coupled to the Windows engine lifecycle. |
 | `mirror.go`, `meterdedup.go`, `wintun_windows.go` | `internal/meter` | Deferred | DPS mirror and Wintun meter have distinct ownership and Windows constraints. |
 | `internal/runtimefiles` | `internal/runtimefiles` | Complete | Already isolated; preserve embedded asset validation. |
 | `internal/tlscert` | `internal/tlscert` | Complete | Public certificate remains build metadata only; runtime no longer needs to trust it. |
-| build and release scripts | `scripts/` plus root wrappers | In progress | Consolidate commands without breaking existing user entrypoints. |
+| build and release scripts | `scripts/` plus root wrappers | Complete | Existing scripts now build `./cmd/aionwg` and find assets under `internal/app`. |
 
 ## Invariants during migration
 

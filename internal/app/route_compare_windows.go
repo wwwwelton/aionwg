@@ -12,7 +12,11 @@ func routeCandidates(s Stats, warpMultipath bool) []RouteCandidate {
 		{Kind: RouteDirect, Name: "Conexão direta", Measurement: pingMeasurement(s.PingGameDirect, "ICMP direto")},
 		{Kind: RouteWireGuard, Name: "WireGuard ativo", Measurement: pingMeasurement(s.PingGame, "ICMP túnel")},
 		{Kind: RouteWARP, Name: "WARP/WARP+ multipath", Measurement: warpMeasurement(s, warpMultipath)},
-		{Kind: RouteRelay, Name: "Relay próprio", Measurement: RouteMeasurement{Transport: "não configurado"}},
+	}
+	if len(s.RelayCandidates) == 0 {
+		candidates = append(candidates, RouteCandidate{Kind: RouteRelay, Name: "Relay próprio", Measurement: RouteMeasurement{Transport: "nenhum relay configurado"}})
+	} else {
+		candidates = append(candidates, s.RelayCandidates...)
 	}
 	return rankRouteCandidates(candidates)
 }

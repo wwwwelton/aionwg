@@ -91,6 +91,7 @@ type EngineOptions struct {
 	BestEndpoint     bool // monitor and try faster endpoints while connected
 	WarpMultipath    bool // WARP: open three extra sessions; opt-in for this connection
 	CWBSearch        bool // pick the lowest-ping Curitiba endpoint, measured with a dummy target when no game runs
+	CustomRelays     []string
 }
 
 // Diag are counters for the diagnostics panel.
@@ -166,6 +167,7 @@ type Stats struct {
 	RouteNote              string     // last route monitor / endpoint switch message
 	Exit                   ExitInfo   // where the tunnel exits (zero until measured)
 	Paths                  []udpPathStatus
+	RelayCandidates        []RouteCandidate
 	Backend                string
 	DriverLoaded           bool
 	InterceptorActive      bool
@@ -247,27 +249,29 @@ type Engine struct {
 	wg      sync.WaitGroup
 	stop    chan struct{}
 
-	pingMu    sync.Mutex
-	pingSeq   uint16
-	pending   map[uint32]time.Time // id<<16|seq -> sent
-	pings     map[uint16]*pingState
-	gwTarget  netip.Addr
-	profile   string // profile file name: key of the persisted routes
-	lrMu      sync.Mutex
-	learned   map[netip.AddrPort]bool // endpoints proven by a handshake (route monitor)
-	routeMon  bool
-	cwbOn     bool // dummy-target pings feed the Curitiba search
-	routeNote atomic.Pointer[string]
-	exit      atomic.Pointer[ExitInfo]
-	geoMu     sync.Mutex
-	geoWait   map[uint16]chan string // DNS id -> waiting exit query
-	geoSeq    uint16
-	trace     atomic.Pointer[RouteTrace]
-	traceKick chan struct{}
-	traceMu   sync.Mutex
-	traceRun  uint8
-	traceSent map[uint16]time.Time
-	traceGot  map[uint16]traceAnswer
+	pingMu          sync.Mutex
+	pingSeq         uint16
+	pending         map[uint32]time.Time // id<<16|seq -> sent
+	pings           map[uint16]*pingState
+	gwTarget        netip.Addr
+	profile         string // profile file name: key of the persisted routes
+	lrMu            sync.Mutex
+	learned         map[netip.AddrPort]bool // endpoints proven by a handshake (route monitor)
+	routeMon        bool
+	relayMu         sync.RWMutex
+	relayCandidates []RouteCandidate
+	cwbOn           bool // dummy-target pings feed the Curitiba search
+	routeNote       atomic.Pointer[string]
+	exit            atomic.Pointer[ExitInfo]
+	geoMu           sync.Mutex
+	geoWait         map[uint16]chan string // DNS id -> waiting exit query
+	geoSeq          uint16
+	trace           atomic.Pointer[RouteTrace]
+	traceKick       chan struct{}
+	traceMu         sync.Mutex
+	traceRun        uint8
+	traceSent       map[uint16]time.Time
+	traceGot        map[uint16]traceAnswer
 }
 
 type pingState struct {
@@ -483,6 +487,10 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 	if opt.CWBSearch {
 		e.wg.Add(1)
 		go func() { defer e.wg.Done(); e.cwbLoop() }()
+	}
+	if len(opt.CustomRelays) > 0 {
+		e.wg.Add(1)
+		go func() { defer e.wg.Done(); e.relayLoop(opt.CustomRelays) }()
 	}
 	if e.paths[0] != nil {
 		e.wg.Add(1)
@@ -1153,6 +1161,9 @@ func (e *Engine) Stats() Stats {
 			})
 		}
 	}
+	e.relayMu.RLock()
+	s.RelayCandidates = append([]RouteCandidate(nil), e.relayCandidates...)
+	e.relayMu.RUnlock()
 	if rt := e.trace.Load(); rt != nil {
 		s.Route = *rt
 	}

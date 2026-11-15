@@ -1,12 +1,12 @@
 # Windows build
 
-The source tree currently builds the root `main` package. The future `cmd/aionwg` command is documented in the architecture migration map but does not exist yet.
+The canonical executable is `cmd/aionwg`. The root `main.go` remains a compatibility wrapper for existing `go build .` workflows.
 
 ## Cross-compile from Linux or WSL
 
 ```bash
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
-  go build -trimpath -ldflags='-s -w' -o dist/AionWG.exe .
+  go build -trimpath -ldflags='-s -w' -o dist/AionWG.exe ./cmd/aionwg
 ```
 
 For a packaged distribution with the embedded runtime assets available:

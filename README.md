@@ -114,12 +114,12 @@ go vet ./...
 go build ./...
 ```
 
-Windows x64 cross-build, verified for the current root entrypoint:
+Windows x64 cross-build, verified for `cmd/aionwg`:
 
 ```bash
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
   go build -trimpath -ldflags='-s -w' \
-  -o dist/AionWG.exe .
+  -o dist/AionWG.exe ./cmd/aionwg
 ```
 
 Packaged build:
@@ -142,7 +142,7 @@ Standalone embedded build:
 ./build-embedded.sh
 ```
 
-The package is intentionally not `./cmd/aionwg` yet; the package migration is tracked as a separate, behavior-preserving phase.
+`cmd/aionwg` is the canonical executable entrypoint. The root `main.go` remains as a compatibility wrapper for existing build commands.
 
 ## Security and privacy
 

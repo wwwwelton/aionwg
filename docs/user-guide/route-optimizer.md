@@ -19,6 +19,13 @@ The route screen and the `b`/`v` controls expose the current route and endpoint
 selection. ICMP RTT is not the same measurement as game RTT; use the diagnostics
 and the application target configured by `t` before judging a change.
 
+Configured relays can be entered from the command palette (`Ctrl+K` →
+`Configurar relays`) as `host:port` values. AionWG resolves and probes them
+with direct ICMP in a background loop, then shows RTT/P50/P95/jitter/loss on
+the route screen. This is a measured relay candidate, not proof that traffic
+is currently routed through it; use a validated WireGuard profile to switch
+the actual packet path.
+
 AionWG does not claim to control Cloudflare's internal relay selection and does
 not guarantee lower latency. WARP/WARP+ multipath remains an optional AionWG
 feature and is documented separately from Cloudflare's supported client modes.

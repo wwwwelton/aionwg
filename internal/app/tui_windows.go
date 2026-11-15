@@ -73,6 +73,7 @@ const (
 	modeSearch
 	modeTunnelDuplicate
 	modeTunnelRename
+	modeRelay
 )
 
 type uiScreen int
@@ -416,6 +417,7 @@ func (m model) moduleLines() []string {
 			row("Melhor rota", fmt.Sprintf("%v", m.settings.BestEndpoint)),
 			row("WFP", fmt.Sprintf("%v", m.settings.WFP)),
 			row("Multipath", fmt.Sprintf("%v", m.settings.WarpMultipath)),
+			row("Relays próprios", strings.Join(m.settings.CustomRelays, ", ")),
 			row("Persistência", "settings.json; chaves não exibidas"),
 		}
 	}
@@ -491,6 +493,12 @@ func (m model) commandItems() []commandItem {
 			} else {
 				m.log("Perfil %s válido; chaves não exibidas", name)
 			}
+		}},
+		{"Configurar relays", "Ctrl+L", func(m *model) {
+			m.mode = modeRelay
+			m.input.SetValue(strings.Join(m.settings.CustomRelays, ", "))
+			m.input.Placeholder = "host:porta, outro-host:porta (vazio remove)"
+			m.input.Focus()
 		}},
 	}
 }
@@ -586,7 +594,7 @@ func startEngine(name string, s Settings) (*Engine, error) {
 		UDPDuplicate:     s.UDPDuplicate, UDPOriginals: s.UDPOriginals, UDPCopies: s.UDPCopies, UDPForce: s.UDPForce,
 		UDPNewestOut: s.UDPNewestOut, UDPNewestIn: s.UDPNewestIn,
 		FullTunnel: s.FullTunnel, NoDNS: s.NoDNS,
-		WFP: s.WFP, WFPApps: s.WFPApps, BestEndpoint: s.BestEndpoint, WarpMultipath: s.WarpMultipath, CWBSearch: s.CWBSearch,
+		WFP: s.WFP, WFPApps: s.WFPApps, BestEndpoint: s.BestEndpoint, WarpMultipath: s.WarpMultipath, CWBSearch: s.CWBSearch, CustomRelays: s.CustomRelays,
 		ConfigPath: filepath.Join(configDir(), name), ConfigPaths: mirrorPaths,
 	}, func(f string, a ...any) {
 		line := fmt.Sprintf(f, a...)
@@ -1156,6 +1164,19 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					}
 				}
 				m.log("Perfil renomeado: %s → %s", source, v)
+			}
+		case modeRelay:
+			relays, err := parseRelayEndpoints(v)
+			if err != nil {
+				m.log("ERRO nos relays: %v", err)
+				return m, nil
+			}
+			m.settings.CustomRelays = relays
+			_ = saveSettings(m.settings)
+			if len(relays) == 0 {
+				m.log("Relays próprios removidos")
+			} else {
+				m.log("%d relay(s) próprio(s) salvo(s); medição começa na próxima conexão", len(relays))
 			}
 		case modeEndpoint:
 			eng := m.eng
