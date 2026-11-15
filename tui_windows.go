@@ -571,31 +571,48 @@ func animTick() tea.Cmd {
 
 func (m model) Init() tea.Cmd { return tea.Batch(tick(), animTick(), textinput.Blink) }
 
+func startEngine(name string, s Settings) (*Engine, error) {
+	conf, err := readConfig(name)
+	if err != nil {
+		return nil, err
+	}
+	var mirrorPaths []string
+	if exe, err := os.Executable(); err == nil {
+		mirrorPaths = append(mirrorPaths, filepath.Join(filepath.Dir(exe), "configs-wireguard-oficial", name))
+	}
+	return StartEngine(conf, EngineOptions{
+		Processes: s.Processes, ProcessRules: s.ProcessRules, PingTarget: s.PingTarget, Mirror: s.Mirror,
+		MirrorNoLoopback: s.MirrorNoLoopback,
+		UDPDuplicate:     s.UDPDuplicate, UDPOriginals: s.UDPOriginals, UDPCopies: s.UDPCopies, UDPForce: s.UDPForce,
+		UDPNewestOut: s.UDPNewestOut, UDPNewestIn: s.UDPNewestIn,
+		FullTunnel: s.FullTunnel, NoDNS: s.NoDNS,
+		WFP: s.WFP, WFPApps: s.WFPApps, BestEndpoint: s.BestEndpoint, WarpMultipath: s.WarpMultipath, CWBSearch: s.CWBSearch,
+		ConfigPath: filepath.Join(configDir(), name), ConfigPaths: mirrorPaths,
+	}, func(f string, a ...any) {
+		line := fmt.Sprintf(f, a...)
+		diskLog.Printf("%s", line)
+		queueProgramLog(logMsg(line))
+	})
+}
+
 func connectCmd(name string, s Settings) tea.Cmd {
 	return func() tea.Msg {
-		conf, err := readConfig(name)
-		if err != nil {
-			return connectedMsg{err: err}
-		}
-		var mirrorPaths []string
-		if exe, err := os.Executable(); err == nil {
-			mirrorPaths = append(mirrorPaths, filepath.Join(filepath.Dir(exe), "configs-wireguard-oficial", name))
-		}
-		eng, err := StartEngine(conf, EngineOptions{
-			Processes: s.Processes, ProcessRules: s.ProcessRules, PingTarget: s.PingTarget, Mirror: s.Mirror,
-			MirrorNoLoopback: s.MirrorNoLoopback,
-			UDPDuplicate:     s.UDPDuplicate, UDPOriginals: s.UDPOriginals, UDPCopies: s.UDPCopies, UDPForce: s.UDPForce,
-			UDPNewestOut: s.UDPNewestOut, UDPNewestIn: s.UDPNewestIn,
-			FullTunnel: s.FullTunnel, NoDNS: s.NoDNS,
-			WFP: s.WFP, WFPApps: s.WFPApps, BestEndpoint: s.BestEndpoint, WarpMultipath: s.WarpMultipath, CWBSearch: s.CWBSearch,
-			ConfigPath:  filepath.Join(configDir(), name),
-			ConfigPaths: mirrorPaths,
-		}, func(f string, a ...any) {
-			line := fmt.Sprintf(f, a...)
-			diskLog.Printf("%s", line)
-			queueProgramLog(logMsg(line))
-		})
+		eng, err := startEngine(name, s)
 		return connectedMsg{eng: eng, name: name, err: err}
+	}
+}
+
+func switchProfileCmd(oldName, newName string, s Settings) tea.Cmd {
+	return func() tea.Msg {
+		eng, err := startEngine(newName, s)
+		if err == nil {
+			return connectedMsg{eng: eng, name: newName}
+		}
+		rollback, rollbackErr := startEngine(oldName, s)
+		if rollbackErr != nil {
+			return connectedMsg{err: fmt.Errorf("perfil %s falhou: %v; rollback %s também falhou: %w", newName, err, oldName, rollbackErr)}
+		}
+		return connectedMsg{eng: rollback, name: oldName, err: fmt.Errorf("perfil %s falhou: %v; rollback para %s aplicado", newName, err, oldName)}
 	}
 }
 
@@ -756,7 +773,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case connectedMsg:
 		m.connecting = false
-		if msg.err != nil {
+		if msg.eng == nil {
 			m.log("ERRO ao conectar: %v", msg.err)
 			return m, nil
 		}
@@ -764,7 +781,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.prevAt, m.histUp, m.histDown, m.histPing = time.Time{}, nil, nil, nil
 		m.settings.LastConfig = msg.name
 		_ = saveSettings(m.settings)
-		m.log("Conectado com %s — só o tráfego do AION 2 passa pelo túnel", msg.name)
+		if msg.err != nil {
+			m.log("ERRO ao trocar perfil: %v", msg.err)
+		} else {
+			m.log("Conectado com %s — só o tráfego do AION 2 passa pelo túnel", msg.name)
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -817,18 +838,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.connecting {
 				return m, nil
 			}
-			if m.eng != nil {
-				m.eng.Close()
-				m.eng = nil
-				m.log("Desconectado")
-				return m, nil
-			}
 			if len(m.configs) == 0 {
 				m.log("Importe uma config primeiro ([i])")
 				return m, nil
 			}
-			m.connecting = true
 			name := m.configs[m.cursor]
+			if m.eng != nil {
+				if name == m.engName {
+					m.eng.Close()
+					m.eng = nil
+					m.log("Desconectado")
+					return m, nil
+				}
+				oldName := m.engName
+				m.eng.Close()
+				m.eng = nil
+				m.connecting = true
+				m.log("Trocando %s por %s…", oldName, name)
+				return m, switchProfileCmd(oldName, name, m.settings)
+			}
+			m.connecting = true
 			m.log("Conectando com %s…", name)
 			return m, connectCmd(name, m.settings)
 		case "i":
