@@ -21,18 +21,20 @@ import (
 )
 
 const (
-	routeMargin = 5 * time.Millisecond // direct-leg gain that justifies a trial
-	gameGain    = 2 * time.Millisecond // game-ping gain needed to keep a switch
-	minPingRTTs = 5                    // samples needed for a median
+	routeMargin  = 5 * time.Millisecond // direct-leg gain that justifies a trial
+	gameGain     = 2 * time.Millisecond // game-ping gain needed to keep a switch
+	minPingRTTs  = 5                    // samples needed for a median
+	routeMaxLoss = 0.20                 // do not disturb a degraded/unstable live route
 )
 
 // Timing is a variable only so tests can shrink it.
 var (
-	routeEvery    = 30 * time.Second
-	routeSettle   = 12 * time.Second // game pings collected through the new path
-	routeCooldown = 3 * time.Minute  // after a kept switch
-	failCooldown  = 10 * time.Minute // after a failed or reverted one
-	discoverEvery = 10 * time.Second // new endpoints are searched this often, only while the game is idle; each candidate is handshake-probed once
+	routeEvery     = 30 * time.Second
+	routeSettle    = 12 * time.Second // game pings collected through the new path
+	routeCooldown  = 3 * time.Minute  // after a kept switch
+	failCooldown   = 10 * time.Minute // after a failed or reverted one
+	discoverEvery  = 10 * time.Second // endpoint search period; each candidate is handshake-probed once on a separate session
+	gameProbeEvery = time.Minute      // minimum spacing between searches while the game runs
 )
 
 // pickRoute returns the endpoint whose direct leg beats curLeg by routeMargin,
@@ -53,6 +55,10 @@ func pickRoute(curLeg time.Duration, legs map[netip.AddrPort]time.Duration) (net
 // improved by gameGain; an unknown measurement counts as "not proven better".
 func keepRoute(before, after time.Duration) bool {
 	return before > 0 && after > 0 && before-after >= gameGain
+}
+
+func routeBaselineReady(rtt time.Duration, loss float64) bool {
+	return rtt > 0 && loss <= routeMaxLoss
 }
 
 // medianRTT is the median of s, or 0 with fewer than minPingRTTs samples.

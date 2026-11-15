@@ -480,6 +480,10 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 	}
 	e.wg.Add(1)
 	go func() { defer e.wg.Done(); e.scanLoop(opt.BestEndpoint) }()
+	if opt.BestEndpoint {
+		e.wg.Add(1)
+		go func() { defer e.wg.Done(); e.routeLoop() }()
+	}
 	if opt.CWBSearch {
 		e.wg.Add(1)
 		go func() { defer e.wg.Done(); e.cwbLoop() }()
@@ -1796,6 +1800,16 @@ func (e *Engine) gamePing() time.Duration {
 	return 0
 }
 
+func (e *Engine) gameLoss() float64 {
+	e.pingMu.Lock()
+	defer e.pingMu.Unlock()
+	if ps := e.pings[pingIDGame]; ps != nil {
+		return ps.result().Loss
+	}
+	return 0
+
+}
+
 // nap sleeps d and reports false when the engine is stopping.
 func (e *Engine) nap(d time.Duration) bool {
 	select {
@@ -1803,6 +1817,87 @@ func (e *Engine) nap(d time.Duration) bool {
 		return false
 	case <-time.After(d):
 		return true
+	}
+}
+
+// routeLoop is the live route monitor (see routemon.go): it only acts while the
+// game has traffic, spaces attempts out, and keeps a switch only if the game
+// ping measured through the new path is better.
+func (e *Engine) routeLoop() {
+	tk := time.NewTicker(routeEvery)
+	defer tk.Stop()
+	var next time.Time
+	for {
+		select {
+		case <-e.stop:
+			return
+		case <-tk.C:
+		}
+		gs := e.gameServer()
+		if e.closing.Load() {
+			continue
+		}
+		if !gs.IsValid() {
+			continue // no game traffic: nothing to compare (new endpoints: scanLoop)
+		}
+		before := e.gamePing()
+		if !routeBaselineReady(before, e.gameLoss()) {
+			continue
+		}
+		if time.Now().Before(next) {
+			continue
+		}
+		cur := e.eps()[0]
+		curLeg, ok := legProbe(cur.Addr())
+		if !ok {
+			continue
+		}
+		legs := map[netip.AddrPort]time.Duration{}
+		for _, a := range e.learnedList() {
+			if a == cur || e.pathEndpointUsed(a) {
+				continue
+			}
+			if leg, ok := legProbe(a.Addr()); ok {
+				legs[a] = leg
+			}
+		}
+		alt, found := pickRoute(curLeg, legs)
+		if !found {
+			continue
+		}
+		// The handshake is tested first on a throwaway device (separate session);
+		// the live tunnel only switches when that test succeeds.
+		if !probeHandshake(e.conf, e.conf.Peers[0], alt, 2*time.Second) {
+			_ = saveBad(routesPath(), e.profile, alt, time.Now())
+			e.routeLog("rota: %s falhou no handshake de teste (sessão separada); descartado por 7 dias", alt)
+			next = time.Now().Add(routeSettle)
+			continue
+		}
+		e.routeLog("rota: handshake de teste ok em %s (perna direta %v contra %v; ping do jogo atual %v); trocando", alt, legs[alt], curLeg, before)
+		if err := e.SetEndpoint(alt); err != nil {
+			next = time.Now().Add(failCooldown)
+			continue
+		}
+		e.pingMu.Lock()
+		e.pings[pingIDGame] = &pingState{target: gs}
+		e.pingMu.Unlock()
+		select {
+		case <-e.stop:
+			return
+		case <-time.After(routeSettle):
+		}
+		if e.gameServer() != gs { // pingLoop switched target: the RTTs are not comparable
+			continue
+		}
+		after := e.gamePing()
+		if keepRoute(before, after) {
+			e.routeLog("rota: mantida %s — ping do jogo %v -> %v", alt, before, after)
+			next = time.Now().Add(routeCooldown)
+			continue
+		}
+		e.routeLog("rota: ping do jogo não melhorou (%v -> %v); voltando para %s", before, after, cur)
+		_ = e.SetEndpoint(cur)
+		next = time.Now().Add(failCooldown)
 	}
 }
 
@@ -1990,10 +2085,12 @@ func pingMs(p PingResult) int {
 	return max(1, int(p.RTT.Milliseconds()))
 }
 
-// discoverIdle looks for an endpoint faster than the current one while the game
-// has no traffic, so the throwaway handshake cannot disturb a match. It tries
-// at most one candidate per call and remembers the result (learned or failed).
-func (e *Engine) discoverIdle() {
+// discoverEndpoints looks for an endpoint faster than the current one. The
+// handshake is tested on a separate throwaway session, never on the live
+// tunnel. With no game traffic a successful candidate is switched to at once;
+// while the game runs it is only learned, and routeLoop trials it by game ping.
+// It tries at most one candidate per call and remembers the result.
+func (e *Engine) discoverEndpoints() {
 	cur := e.eps()[0]
 	if !cur.Addr().Is4() || len(e.conf.Peers) == 0 {
 		return
@@ -2024,8 +2121,8 @@ func (e *Engine) discoverIdle() {
 		return
 	}
 	curRTT, ranked := rankEndpoints(cur, cands, icmpOnce, icmpMedian)
-	if curRTT == 0 || len(ranked) == 0 || e.gameServer().IsValid() {
-		return // nothing faster, or the game started meanwhile
+	if curRTT == 0 || len(ranked) == 0 {
+		return // nothing faster
 	}
 	r := ranked[0]
 	if probeHandshake(e.conf, p, r.AddrPort, 2*time.Second) {
@@ -2039,7 +2136,7 @@ func (e *Engine) discoverIdle() {
 			}
 			return
 		}
-		e.routeLog("rota: novo endpoint aprendido %s (perna direta %v contra %v); handshake ok, sem ganho suficiente para trocar", r.Addr(), r.RTT, curRTT)
+		e.routeLog("rota: novo endpoint aprendido %s (perna direta %v contra %v); handshake de teste ok, troca só se houver ganho e sem jogo em andamento", r.Addr(), r.RTT, curRTT)
 		return
 	}
 	_ = saveBad(routesPath(), e.profile, r.AddrPort, time.Now())

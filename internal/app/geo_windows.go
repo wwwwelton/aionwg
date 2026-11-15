@@ -16,15 +16,16 @@ const (
 var geoResolver = netip.MustParseAddr("1.1.1.1")
 
 // scanLoop runs every discoverEvery: it keeps the exit location current and,
-// with the best-endpoint option, looks for a better endpoint while the game is
-// idle. Handshake probes stay idle-only: a throwaway handshake with the same
-// key makes the server talk to the probe's socket until the live session
-// speaks again. Each candidate is probed at most once (learned or discarded
-// for days), so a short period does not turn into a handshake burst.
+// with the best-endpoint option, looks for a better endpoint. Candidates are
+// handshake-tested on a separate throwaway session, so the live tunnel is not
+// used for the test. A probe can still make the server talk to the probe's
+// socket until the live session speaks again, so with the game running probes
+// are spaced gameProbeEvery apart. Each candidate is probed at most once
+// (learned or discarded for days).
 func (e *Engine) scanLoop(best bool) {
 	tk := time.NewTicker(discoverEvery)
 	defer tk.Stop()
-	var tried time.Time
+	var tried, probed time.Time
 	for {
 		select {
 		case <-e.stop:
@@ -38,8 +39,9 @@ func (e *Engine) scanLoop(best bool) {
 			tried = time.Now()
 			e.refreshExit()
 		}
-		if best && !e.gameServer().IsValid() {
-			e.discoverIdle()
+		if best && (!e.gameServer().IsValid() || time.Since(probed) >= gameProbeEvery) {
+			probed = time.Now()
+			e.discoverEndpoints()
 		}
 	}
 }

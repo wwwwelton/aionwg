@@ -70,3 +70,102 @@ func routeFixture(t *testing.T) (e *Engine, a, b netip.AddrPort, logs func() str
 	e.learned = map[netip.AddrPort]bool{a: true, b: true}
 	return e, a, b, func() string { mu.Lock(); defer mu.Unlock(); return sb.String() }
 }
+
+func runRouteLoop(t *testing.T, gameViaB time.Duration) (final netip.AddrPort, a, b netip.AddrPort, logs string) {
+	e, a, b, getLogs := routeFixture(t)
+	defer func(ev, st, rc, fc, sw time.Duration, p func(netip.Addr) (time.Duration, bool)) {
+		routeEvery, routeSettle, routeCooldown, failCooldown, endpointSwitchWait, legProbe = ev, st, rc, fc, sw, p
+	}(routeEvery, routeSettle, routeCooldown, failCooldown, endpointSwitchWait, legProbe)
+	routeEvery, routeSettle, routeCooldown, failCooldown, endpointSwitchWait = 100*time.Millisecond, 600*time.Millisecond, time.Minute, time.Minute, 3*time.Second
+	legProbe = func(x netip.Addr) (time.Duration, bool) {
+		if x == a.Addr() {
+			return 20 * time.Millisecond, true
+		}
+		return 10 * time.Millisecond, true
+	}
+	done := make(chan struct{})
+	go func() { // the game ping through whichever route is current
+		defer close(done)
+		for {
+			select {
+			case <-e.stop:
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+			rtt := 30 * time.Millisecond
+			if e.eps()[0] == b {
+				rtt = gameViaB
+			}
+			e.pingMu.Lock()
+			e.pings[pingIDGame].record(true, rtt)
+			e.pingMu.Unlock()
+		}
+	}()
+	time.Sleep(300 * time.Millisecond) // enough samples before the first tick
+	go e.routeLoop()
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(getLogs(), "mantida") && !strings.Contains(getLogs(), "voltando para") {
+		time.Sleep(50 * time.Millisecond)
+	}
+	time.Sleep(400 * time.Millisecond)
+	close(e.stop)
+	<-done
+	return e.eps()[0], a, b, getLogs()
+}
+
+func TestRouteLoopKeepsTheRouteWhenGamePingImproves(t *testing.T) {
+	final, _, b, logs := runRouteLoop(t, 20*time.Millisecond)
+	if final != b || !strings.Contains(logs, "mantida") {
+		t.Fatalf("expected to stay on %v with 'mantida'; final=%v\n%s", b, final, logs)
+	}
+}
+
+func TestRouteLoopRevertsWhenGamePingDoesNotImprove(t *testing.T) {
+	final, a, _, logs := runRouteLoop(t, 45*time.Millisecond)
+	if final != a || !strings.Contains(logs, "voltando para") {
+		t.Fatalf("expected to revert to %v; final=%v\n%s", a, final, logs)
+	}
+}
+
+// A faster-looking endpoint whose separate handshake test fails must never
+// receive the live tunnel.
+func TestRouteLoopDoesNotSwitchWhenTheSeparateHandshakeFails(t *testing.T) {
+	t.Setenv("APPDATA", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	e, a, _, getLogs := routeFixture(t)
+	dead := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.3"), freeUDPPort(t)) // nothing listens
+	e.learned = map[netip.AddrPort]bool{a: true, dead: true}
+	defer func(ev time.Duration, p func(netip.Addr) (time.Duration, bool)) { routeEvery, legProbe = ev, p }(routeEvery, legProbe)
+	routeEvery = 100 * time.Millisecond
+	legProbe = func(x netip.Addr) (time.Duration, bool) {
+		if x == a.Addr() {
+			return 20 * time.Millisecond, true
+		}
+		return 5 * time.Millisecond, true
+	}
+	go func() { // enough game pings for the baseline
+		for {
+			select {
+			case <-e.stop:
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+			e.pingMu.Lock()
+			e.pings[pingIDGame].record(true, 30*time.Millisecond)
+			e.pingMu.Unlock()
+		}
+	}()
+	time.Sleep(300 * time.Millisecond)
+	go e.routeLoop()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(getLogs(), "falhou no handshake de teste") {
+		time.Sleep(50 * time.Millisecond)
+	}
+	close(e.stop)
+	if !strings.Contains(getLogs(), "falhou no handshake de teste") {
+		t.Fatalf("expected the separate handshake test to fail:\n%s", getLogs())
+	}
+	if got := e.eps()[0]; got != a {
+		t.Fatalf("live endpoint changed to %v:\n%s", got, getLogs())
+	}
+}
