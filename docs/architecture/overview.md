@@ -53,7 +53,8 @@ This graph is a migration target, not a claim that all packages already exist.
 | `divert_windows.go` | `internal/capture/windivert` | Deferred | Capture handles and address ABI must move without changing filters or reinjection. |
 | `packet.go`, `splittun.go`, UDP files | `internal/packet`, `internal/tunnel` | Deferred | Hot path and buffer ownership need benchmarks and package-level interfaces first. |
 | `native_wfp*.go` | `internal/wfp` | Deferred | Current user-mode policy engine is functional but coupled to `Engine` lifecycle. |
-| `bestendpoint.go`, `route*.go`, `paths*.go` | `internal/route`, `internal/warp` | Deferred | Route persistence and WARP multipath must remain behaviorally identical. |
+| `route_compare.go` | `internal/route` | Complete | Ranking primitives are isolated; Windows measurement adapters remain in the root until the engine lifecycle is extracted. |
+| `bestendpoint.go`, `routemon.go`, `paths*.go` | `internal/route`, `internal/warp` | Deferred | Endpoint persistence and WARP multipath remain coupled to the Windows engine lifecycle. |
 | `mirror.go`, `meterdedup.go`, `wintun_windows.go` | `internal/meter` | Deferred | DPS mirror and Wintun meter have distinct ownership and Windows constraints. |
 | `internal/runtimefiles` | `internal/runtimefiles` | Complete | Already isolated; preserve embedded asset validation. |
 | `internal/tlscert` | `internal/tlscert` | Complete | Public certificate remains build metadata only; runtime no longer needs to trust it. |
