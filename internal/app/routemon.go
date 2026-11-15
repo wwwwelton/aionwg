@@ -147,6 +147,23 @@ func saveRoute(path, profile string, ep netip.AddrPort) error {
 	})
 }
 
+// removeRoute forgets ep for profile (the endpoint failed an isolated test).
+func removeRoute(path, profile string, ep netip.AddrPort) error {
+	return mutateRoutes(path, func(m map[string][]string) bool {
+		var keep []string
+		for _, s := range m[profile] {
+			if s != ep.String() {
+				keep = append(keep, s)
+			}
+		}
+		if len(keep) == len(m[profile]) {
+			return false
+		}
+		m[profile] = keep
+		return true
+	})
+}
+
 // badTTL is how long an endpoint that failed a handshake is not tried again.
 const badTTL = 7 * 24 * time.Hour
 

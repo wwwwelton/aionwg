@@ -138,6 +138,10 @@ func TestRouteLoopDoesNotSwitchWhenTheSeparateHandshakeFails(t *testing.T) {
 	e, a, _, getLogs := routeFixture(t)
 	dead := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.3"), freeUDPPort(t)) // nothing listens
 	e.learned = map[netip.AddrPort]bool{a: true, dead: true}
+	e.profile = "p.conf"
+	if err := saveRoute(routesPath(), e.profile, dead); err != nil {
+		t.Fatal(err)
+	}
 	probeConfFn = func(live *WGConf) *WGConf { return live } // stands for another identity
 	defer func(ev time.Duration, p func(netip.Addr) (time.Duration, bool)) { routeEvery, legProbe = ev, p }(routeEvery, legProbe)
 	routeEvery = 100 * time.Millisecond
@@ -171,5 +175,16 @@ func TestRouteLoopDoesNotSwitchWhenTheSeparateHandshakeFails(t *testing.T) {
 	}
 	if got := e.eps()[0]; got != a {
 		t.Fatalf("live endpoint changed to %v:\n%s", got, getLogs())
+	}
+	if e.learned[dead] {
+		t.Fatal("an endpoint that failed the isolated test must be forgotten")
+	}
+	for _, ep := range loadRoutes(routesPath(), e.profile) {
+		if ep == dead {
+			t.Fatal("the failed endpoint must be removed from the saved routes")
+		}
+	}
+	if !loadBad(routesPath(), e.profile, time.Now())[dead.Addr()] {
+		t.Fatal("the failed endpoint must be marked bad")
 	}
 }

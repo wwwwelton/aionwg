@@ -91,6 +91,9 @@ func (e *Engine) cwbRound() {
 		if e.closing.Load() {
 			return
 		}
+		if ep != orig && e.rejectByProbe(ep) {
+			continue
+		}
 		if ep != orig {
 			if err := e.SetEndpoint(ep); err != nil {
 				e.routeLog("cwb: %s não trocou: %v", ep, err)

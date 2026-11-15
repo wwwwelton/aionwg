@@ -1783,6 +1783,31 @@ func (e *Engine) learn(ep netip.AddrPort) {
 	}
 }
 
+// forget drops ep from the learned endpoints (this session and the saved
+// profile routes) and skips it for badTTL.
+func (e *Engine) forget(ep netip.AddrPort) {
+	e.lrMu.Lock()
+	delete(e.learned, ep)
+	e.lrMu.Unlock()
+	if e.profile != "" {
+		_ = removeRoute(routesPath(), e.profile, ep)
+		_ = saveBad(routesPath(), e.profile, ep, time.Now())
+	}
+}
+
+// rejectByProbe handshake-tests ep with the identity chosen for [b] (never the
+// live key) and, when the test fails, forgets the endpoint. It reports whether
+// ep must not be used; with no chosen identity nothing is tested.
+func (e *Engine) rejectByProbe(ep netip.AddrPort) bool {
+	alt := e.probeConf()
+	if alt == nil || probeHandshake(alt, alt.Peers[0], ep, 2*time.Second) {
+		return false
+	}
+	e.forget(ep)
+	e.routeLog("rota: %s falhou no handshake de teste (conta separada); descartado por 7 dias", ep)
+	return true
+}
+
 func (e *Engine) learnedList() []netip.AddrPort {
 	e.lrMu.Lock()
 	defer e.lrMu.Unlock()
@@ -1869,12 +1894,10 @@ func (e *Engine) routeLoop() {
 		if !found {
 			continue
 		}
-		// The handshake is tested on a throwaway device with another identity,
-		// so the live session is untouched; without one, no test (the switch
-		// still waits for the live handshake and reverts on failure).
-		if altConf := e.probeConf(); altConf != nil && !probeHandshake(altConf, altConf.Peers[0], alt, 2*time.Second) {
-			_ = saveBad(routesPath(), e.profile, alt, time.Now())
-			e.routeLog("rota: %s falhou no handshake de teste (sessão separada); descartado por 7 dias", alt)
+		// The handshake is tested on a throwaway device with the chosen free
+		// account, so the live session is untouched; without one, no test (the
+		// switch still waits for the live handshake and reverts on failure).
+		if e.rejectByProbe(alt) {
 			next = time.Now().Add(routeSettle)
 			continue
 		}
