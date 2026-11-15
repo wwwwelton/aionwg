@@ -4,9 +4,14 @@ AionWG handles VPN credentials, process metadata, native drivers and packet inte
 
 ## Reporting
 
-Use the repository owner's GitHub Security Advisories/private vulnerability reporting feature when it is enabled. If it is not enabled, the repository owner must configure a private reporting channel before accepting confidential reports. Do not guess or use an unverified email address.
+The official channel is GitHub's private vulnerability reporting feature:
+open this repository's **Security** tab, choose **Advisories**, then **Report
+a vulnerability**. This channel must be enabled by the repository owner; no
+security email address is configured in this repository.
 
-If private reporting is unavailable, open a minimal public issue containing only a non-sensitive description and state that private contact is required. Do not attach exploit code or credentials.
+If private reporting is unavailable, open a minimal public issue containing
+only a non-sensitive description and state that private contact is required.
+Do not attach exploit code, credentials, private keys or unredacted logs.
 
 ## Include
 

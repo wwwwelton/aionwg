@@ -151,7 +151,7 @@ The package is intentionally not `./cmd/aionwg` yet; the package migration is tr
 - Embedded runtime assets are content-addressed and verified before loading.
 - The application does not install its self-signed build certificate into Windows Root or TrustedPublisher stores.
 - Authenticode signing an EXE does not sign a kernel driver.
-- The repository has no project-level `LICENSE`; see [`docs/security/licensing.md`](docs/security/licensing.md) before redistribution.
+- The project license is MIT; third-party files keep their own notices and terms. See [`LICENSE`](LICENSE) and [`docs/security/licensing.md`](docs/security/licensing.md) before redistribution.
 
 ## Contributing
 
