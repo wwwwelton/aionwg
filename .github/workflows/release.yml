@@ -2,9 +2,15 @@ name: build-and-release
 
 on:
   push:
-    branches: [main]
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Semantic version tag to publish, for example v1.0.32
+        required: true
+        type: string
 
-# One release at a time so version numbers never collide.
+# One release at a time so published assets never collide.
 concurrency:
   group: release
   cancel-in-progress: false
@@ -13,18 +19,7 @@ permissions:
   contents: read
 
 jobs:
-  test-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - run: go vet ./...
-      - run: go test ./...
-
   release:
-    needs: test-windows
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -64,16 +59,17 @@ jobs:
           set -euo pipefail
           rm -f dist/AionWG-standalone-windows-x64.zip
           (cd dist/standalone && zip -q ../AionWG-standalone-windows-x64.zip AionWG.exe WinDivert-LICENSE.txt WireGuard-go-LICENSE.txt)
-      - name: Compute next version
+      - name: Validate release tag
         id: version
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          last=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
-          if [ -z "$last" ]; then next=v1.0.0; else
-            IFS=. read -r major minor patch <<<"${last#v}"
-            next="v${major}.${minor}.$((patch + 1))"
-          fi
-          echo "tag=$next" >> "$GITHUB_OUTPUT"
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::release tag must match vMAJOR.MINOR.PATCH"
+            exit 1
+          }
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}

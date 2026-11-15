@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  go-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Check formatting
+        shell: bash
+        run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go test -race ./...
+      - run: go build ./...
+      - name: Native compatibility regression
+        run: cc -std=c11 -Wall -Wextra -Werror native/shugo-compat-test.c -o /tmp/shugo-check && /tmp/shugo-check
+
+  go-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+      - shell: pwsh
+        run: New-Item -ItemType Directory -Force dist | Out-Null
+      - run: go build -trimpath -ldflags '-s -w' -o dist/AionWG.exe .
