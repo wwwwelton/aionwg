@@ -147,7 +147,10 @@ type Stats struct {
 	IPv6Direct             bool   // full tunnel but config has no IPv6 address
 	WFPOn                  bool   // WFP mode: only the selected apps are tunnelled
 	WFPSocket              bool   // SOCKET layer open (false = system-table fallback only)
-	DNSTunnel              bool   // DNS redirect active
+	PolicyBackend          string
+	PacketBackend          string
+	NativeWFP              NativeWFPStatus
+	DNSTunnel              bool // DNS redirect active
 	Diag                   Diag
 	Endpoint               string
 	TunnelAddr             string
@@ -223,7 +226,9 @@ type Engine struct {
 	noDNS                                      atomic.Bool
 	wfpOn                                      atomic.Bool // WFP mode: only the selected apps are tunnelled
 	wfp                                        *wfpMonitor // nil when the SOCKET layer could not be opened
-	access                                     accessLog   // remotes per program, reported every 30 s
+	nativeWFP                                  nativeWFPPolicy
+	nativeWFPUpdates                           chan []ProcessRule
+	access                                     accessLog // remotes per program, reported every 30 s
 	cCaptured, cInjected, cInNoNAT, cInjectErr atomic.Uint64
 	cSegmented, cICMPErr, cDNSQ, cDNSA         atomic.Uint64
 	cV6Block                                   atomic.Uint64
@@ -384,6 +389,17 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 
 	e.owner = newOwnerTracker(opt.Processes)
 	e.owner.SetRules(opt.ProcessRules, opt.Processes)
+	e.nativeWFP = newNativeWFPManager(logf)
+	if err := e.nativeWFP.Open(); err != nil {
+		logf("aviso: Native WFP User Mode indisponível: %v", err)
+	} else if err := e.nativeWFP.ReplaceRules(opt.ProcessRules); err != nil {
+		logf("aviso: políticas BLOCK não aplicadas no WFP nativo: %v", err)
+	}
+	if e.nativeWFP.Status().SessionOpen {
+		e.nativeWFPUpdates = make(chan []ProcessRule, 1)
+		e.wg.Add(1)
+		go e.nativeWFPApplyLoop()
+	}
 	e.mirror = newMirror(opt.Mirror, logf)
 	e.mirror.trace = e.logDisk
 	e.mirror.noLoopback.Store(opt.MirrorNoLoopback)
@@ -1150,9 +1166,17 @@ func (e *Engine) Stats() Stats {
 	wfpOn := e.wfpOn.Load() && e.wfp != nil
 	s.WFPOn = wfpOn
 	s.WFPSocket = e.wfp != nil && e.wfp.h != 0
-	s.Backend = "Legacy WinDivert NETWORK"
+	s.PacketBackend = "WinDivert NETWORK"
+	s.PolicyBackend = "Native WFP User Mode Policy"
+	if e.nativeWFP != nil {
+		s.NativeWFP = e.nativeWFP.Status()
+		if !s.NativeWFP.SessionOpen {
+			s.PolicyBackend = "Native WFP User Mode Policy (erro)"
+		}
+	}
+	s.Backend = s.PacketBackend
 	if wfpOn {
-		s.Backend = "Hybrid WFP SOCKET + WinDivert NETWORK"
+		s.Backend = "Native WFP User Mode Policy + WinDivert NETWORK"
 	}
 	// WFP replaces the full tunnel, so it must not be reported while it is on.
 	s.FullTunnel = s.FullTunnel && !wfpOn
@@ -1234,9 +1258,47 @@ func (e *Engine) Stats() Stats {
 }
 
 func (e *Engine) SetProcesses(names []string) { e.owner.SetNames(names) }
+func (e *Engine) nativeWFPApplyLoop() {
+	defer e.wg.Done()
+	for {
+		select {
+		case <-e.stop:
+			return
+		case rules := <-e.nativeWFPUpdates:
+			if e.nativeWFP == nil {
+				return
+			}
+			if err := e.nativeWFP.ReplaceRules(rules); err != nil {
+				e.logf("WFP nativo: regras não aplicadas: %v", err)
+			}
+		}
+	}
+}
+
+func (e *Engine) queueNativeWFPRules(rules []ProcessRule) {
+	if e.nativeWFPUpdates == nil || e.closing.Load() {
+		return
+	}
+	queued := append([]ProcessRule(nil), rules...)
+	select {
+	case e.nativeWFPUpdates <- queued:
+	default:
+		select {
+		case <-e.nativeWFPUpdates:
+		default:
+		}
+		select {
+		case e.nativeWFPUpdates <- queued:
+		default:
+		}
+	}
+}
 
 func (e *Engine) SetProcessRules(rules []ProcessRule, names []string) {
 	e.owner.SetRules(rules, names)
+	if e.nativeWFP != nil {
+		e.queueNativeWFPRules(rules)
+	}
 }
 
 // SetMirror must never block Bubble Tea's Update loop. Opening a Wintun
@@ -1535,6 +1597,9 @@ func (e *Engine) Close() {
 	}
 	if e.wfp != nil {
 		e.wfp.Close()
+	}
+	if e.nativeWFP != nil {
+		e.nativeWFP.Close()
 	}
 	e.setShugo(false)
 	e.waitShugo()

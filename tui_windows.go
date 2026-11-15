@@ -306,9 +306,17 @@ func (m model) moduleLines() []string {
 		if s.WFPSocket {
 			socket = "ativo"
 		}
-		return []string{
+		policy := valueOrDash(s.PolicyBackend)
+		packet := valueOrDash(s.PacketBackend)
+		session := stateValue(s.NativeWFP.SessionOpen)
+		provider := stateValue(s.NativeWFP.ProviderRegistered)
+		sublayer := stateValue(s.NativeWFP.SubLayerRegistered)
+		lines := []string{
 			row("Backend", m.backendLabel()),
-			row("Native WFP", sDim.Render("não implementado nesta build")),
+			row("Policy", policy),
+			row("Packet", packet),
+			row("Sessão", session+" · provider "+provider+" · sublayer "+sublayer),
+			row("Filtros", fmt.Sprintf("%d filtros · %d regras BLOCK", s.NativeWFP.FiltersInstalled, s.NativeWFP.RulesActive)),
 			row("Driver", stateValue(s.DriverLoaded)+" · WinDivert"),
 			row("Interceptação", stateValue(s.InterceptorActive)),
 			row("Interface", stateValue(s.VirtualInterfaceActive)),
@@ -319,6 +327,10 @@ func (m model) moduleLines() []string {
 			row("Processos", fmt.Sprintf("%d selecionados · %d fluxos", len(m.settings.WFPApps), s.GameFlows)),
 			row("Ação", sDim.Render("[w] alternar · [l] selecionar apps")),
 		}
+		if s.NativeWFP.LastError != "" {
+			lines = append(lines, row("Erro WFP", s.NativeWFP.LastError))
+		}
+		return lines
 	case screenUDP:
 		lines := []string{
 			row("Duplicação", udpDupStatus(s)),

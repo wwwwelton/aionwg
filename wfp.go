@@ -35,6 +35,7 @@ const (
 
 type ProcessRule struct {
 	Name   string        `json:"name"`
+	Path   string        `json:"path,omitempty"`
 	Policy ProcessPolicy `json:"policy"`
 }
 
