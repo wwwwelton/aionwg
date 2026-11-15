@@ -70,7 +70,37 @@ const (
 	modeWFPApps
 	modeEndpoint
 	modeEndpointPick
+	modeSearch
 )
+
+type uiScreen int
+
+const (
+	screenDashboard uiScreen = iota
+	screenProcesses
+	screenTunnels
+	screenRoutes
+	screenWFP
+	screenUDP
+	screenWarp
+	screenLatency
+	screenDiagnostics
+	screenSettings
+)
+
+type uiOverlay int
+
+const (
+	overlayNone uiOverlay = iota
+	overlayPalette
+	overlayHelp
+)
+
+type commandItem struct {
+	name string
+	key  string
+	run  func(*model)
+}
 
 type (
 	tickMsg      time.Time
@@ -86,13 +116,17 @@ type (
 )
 
 type model struct {
-	frame    int // animation frame, advances every animTick
-	settings Settings
-	configs  []string
-	cursor   int
-	mode     mode
-	input    textinput.Model
-
+	frame      int // animation frame, advances every animTick
+	settings   Settings
+	configs    []string
+	cursor     int
+	mode       mode
+	input      textinput.Model
+	screen     uiScreen
+	previous   uiScreen
+	overlay    uiOverlay
+	palette    int
+	filter     string
 	eng        *Engine
 	engName    string
 	connecting bool
@@ -142,6 +176,266 @@ func newModel() model {
 		m.log("Nenhuma config ainda — pressione [i] para importar um .conf do WireGuard")
 	}
 	return m
+}
+
+var screenLabels = [...]string{
+	"Dashboard", "Processos", "Túneis", "Rotas", "WFP",
+	"UDP", "WARP", "Latência", "Diagnóstico", "Configurações",
+}
+
+func (m *model) setScreen(s uiScreen) {
+	if s < screenDashboard || s > screenSettings || m.screen == s {
+		return
+	}
+	m.previous, m.screen = m.screen, s
+}
+
+func (m *model) backScreen() {
+	if m.screen == screenDashboard {
+		return
+	}
+	m.screen, m.previous = m.previous, screenDashboard
+}
+
+func (m model) navTabs() string {
+	maxWidth := m.width - 4
+	if maxWidth < 70 {
+		maxWidth = 70
+	}
+	labels := screenLabels[:]
+	if maxWidth < 120 {
+		labels = []string{"Dash", "Proc", "Tun", "Rot", "WFP", "UDP", "WRP", "RTT", "Diag", "Set"}
+	}
+	var lines []string
+	line := ""
+	for i, label := range labels {
+		tab := fmt.Sprintf("F%d %s", i+1, label)
+		if uiScreen(i) == m.screen {
+			tab = lipgloss.NewStyle().Foreground(lipgloss.Color("#000000")).Background(cAccent).Padding(0, 1).Render(tab)
+		} else {
+			tab = lipgloss.NewStyle().Foreground(cDim).Render(tab)
+		}
+		next := tab
+		if line != "" {
+			next = line + "  " + tab
+		}
+		if line != "" && lipgloss.Width(next) > maxWidth {
+			lines = append(lines, line)
+			line = tab
+		} else {
+			line = next
+		}
+	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m model) backendLabel() string {
+	if m.eng == nil {
+		return sDim.Render("não conectado")
+	}
+	if m.stats.WFPOn {
+		return lipgloss.NewStyle().Foreground(cGreen).Render("Hybrid · WFP SOCKET + WinDivert NETWORK")
+	}
+	return lipgloss.NewStyle().Foreground(cYellow).Render("Legacy · WinDivert NETWORK")
+}
+
+func (m model) moduleLines() []string {
+	s := m.stats
+	switch m.screen {
+	case screenProcesses:
+		procs := processSummary(s.Procs, false)
+		if m.eng == nil {
+			procs = strings.Join(m.settings.Processes, ", ")
+		}
+		if procs == "" {
+			procs = sDim.Render("nenhum processo observado")
+		}
+		return []string{
+			row("Política", "DEFAULT · lista atual preservada"),
+			row("Túnel", procs),
+			row("WFP apps", fmt.Sprintf("%d selecionados · [l] editar", len(m.settings.WFPApps))),
+			row("Ação", sDim.Render("[p] editar lista · [l] selecionar apps WFP")),
+		}
+	case screenTunnels:
+		connected := sDim.Render("desconectado")
+		if m.eng != nil {
+			connected = lipgloss.NewStyle().Foreground(cGreen).Render("conectado")
+		}
+		return []string{
+			row("Perfis", fmt.Sprintf("%d configurações", len(m.configs))),
+			row("Selecionado", selectedConfig(m.configs, m.cursor)),
+			row("Conectado", connected),
+			row("Endpoint", valueOrDash(s.Endpoint)),
+			row("Túnel", valueOrDash(s.TunnelAddr)),
+		}
+	case screenRoutes:
+		return []string{
+			row("Backend", m.backendLabel()),
+			row("Endpoint", valueOrDash(s.Endpoint)),
+			row("Monitor", routeStatus(s)),
+			row("Rota", routeSummaryLine(s)),
+			row("Ação", sDim.Render("[b] melhor rota · [v] trocar endpoint · [t] alvo do ping")),
+		}
+	case screenWFP:
+		socket := "indisponível"
+		if s.WFPSocket {
+			socket = "ativo"
+		}
+		return []string{
+			row("Backend", m.backendLabel()),
+			row("Driver nativo", sDim.Render("não implementado nesta build")),
+			row("SOCKET/ALE", socket),
+			row("Processos", fmt.Sprintf("%d selecionados · %d fluxos", len(m.settings.WFPApps), s.GameFlows)),
+			row("Ação", sDim.Render("[w] alternar · [l] selecionar apps")),
+		}
+	case screenUDP:
+		lines := []string{
+			row("Duplicação", udpDupStatus(s)),
+			row("Proporção", udpRatioLabel(m.settings.UDPOriginals, m.settings.UDPCopies)),
+			row("Forçar UDP", fmt.Sprintf("%v", m.settings.UDPForce)),
+			row("Envio recente", fmt.Sprintf("%v", m.settings.UDPNewestOut)),
+			row("Chegada recente", fmt.Sprintf("%v", m.settings.UDPNewestIn)),
+		}
+		if m.eng != nil {
+			lines = append(lines, row("Contadores", fmt.Sprintf("originais %d · cópias %d · descartes %d · erros %d", s.UDPDupAccepted, s.UDPDupSent, s.UDPDupDropped, s.UDPDupErrors)))
+		}
+		return lines
+	case screenWarp:
+		paths := "uma sessão"
+		if len(s.Paths) > 0 {
+			paths = udpPathsStatus(s.Paths)
+		}
+		return []string{
+			row("Rota", valueOrDash(s.Endpoint)),
+			row("Sessões", paths),
+			row("Multipath", fmt.Sprintf("%v · [h] alternar", m.settings.WarpMultipath)),
+			row("Origem", "sessões WARP gerenciadas pelo AionWG"),
+		}
+	case screenLatency:
+		return []string{
+			row("VPN direto", fmtPing(s.PingEndpoint)),
+			row("Túnel", fmtPing(s.PingTunnel)),
+			row("Jogo túnel", fmtPing(s.PingGame)),
+			row("Jogo direto", fmtPing(s.PingGameDirect)),
+			row("Histórico", histStats(m.histPing, func(v float64) string { return fmt.Sprintf("%.0f ms", v) })),
+		}
+	case screenDiagnostics:
+		d := s.Diag
+		return []string{
+			row("Backend", m.backendLabel()),
+			row("Capturados", fmt.Sprintf("%d", d.Captured)),
+			row("Reinjetados", fmt.Sprintf("%d", d.Injected)),
+			row("Erros", fmt.Sprintf("injeção %d · sem NAT %d · filas %d", d.InjectErr, d.InNoNAT, d.TunDrop)),
+			row("Ação", sDim.Render("[g] diagnóstico detalhado · [x] autoteste")),
+		}
+	case screenSettings:
+		return []string{
+			row("Full tunnel", fmt.Sprintf("%v", m.settings.FullTunnel)),
+			row("DNS túnel", fmt.Sprintf("%v", !m.settings.NoDNS)),
+			row("Melhor rota", fmt.Sprintf("%v", m.settings.BestEndpoint)),
+			row("WFP", fmt.Sprintf("%v", m.settings.WFP)),
+			row("Multipath", fmt.Sprintf("%v", m.settings.WarpMultipath)),
+			row("Persistência", "settings.json; chaves não exibidas"),
+		}
+	}
+	return nil
+}
+
+func selectedConfig(configs []string, cursor int) string {
+	if cursor >= 0 && cursor < len(configs) {
+		return configs[cursor]
+	}
+	return "—"
+}
+
+func valueOrDash(v string) string {
+	if v == "" {
+		return "—"
+	}
+	return v
+}
+
+func routeSummaryLine(s Stats) string {
+	if s.Route.At.IsZero() {
+		return "medindo…"
+	}
+	return fmt.Sprintf("%d saltos diretos · %d no túnel · medido há %s", len(s.Route.Direct), len(s.Route.Tunnel), time.Since(s.Route.At).Round(time.Second))
+}
+
+func (m model) commandItems() []commandItem {
+	screenCommand := func(s uiScreen) func(*model) {
+		return func(m *model) { m.setScreen(s) }
+	}
+	return []commandItem{
+		{"Dashboard", "F1", screenCommand(screenDashboard)},
+		{"Processos", "F2", func(m *model) { m.setScreen(screenProcesses); m.openPicker() }},
+		{"Túneis", "F3", screenCommand(screenTunnels)},
+		{"Rotas", "F4", screenCommand(screenRoutes)},
+		{"WFP", "F5", screenCommand(screenWFP)},
+		{"UDP e pacotes", "F6", screenCommand(screenUDP)},
+		{"WARP e endpoints", "F7", screenCommand(screenWarp)},
+		{"Latência", "F8", screenCommand(screenLatency)},
+		{"Diagnóstico", "F9", func(m *model) { m.setScreen(screenDiagnostics); m.showDiag = true }},
+		{"Configurações", "F10", screenCommand(screenSettings)},
+		{"Importar configuração", "i", func(m *model) {
+			m.mode = modeImport
+			m.input.SetValue("")
+			m.input.Placeholder = `C:\Users\voce\Downloads\vps.conf`
+			m.input.Focus()
+		}},
+	}
+}
+
+func (m model) filteredCommands() []commandItem {
+	query := strings.ToLower(strings.TrimSpace(m.input.Value()))
+	if query == "" {
+		return m.commandItems()
+	}
+	var out []commandItem
+	for _, c := range m.commandItems() {
+		if strings.Contains(strings.ToLower(c.name), query) || strings.Contains(strings.ToLower(c.key), query) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func (m model) overlayView() string {
+	w := m.width - 8
+	if w < 60 {
+		w = 60
+	}
+	var lines []string
+	switch m.overlay {
+	case overlayPalette:
+		lines = append(lines, sBold.Render("Paleta de comandos")+"  "+m.input.View())
+		items := m.filteredCommands()
+		if len(items) == 0 {
+			lines = append(lines, sDim.Render("nenhum comando corresponde à pesquisa"))
+		}
+		for i, c := range items {
+			mark := "  "
+			if i == m.palette {
+				mark = sSel.Render("▸ ")
+			}
+			lines = append(lines, mark+sKey.Render(c.key)+"  "+c.name)
+		}
+		lines = append(lines, sDim.Render("[↑↓] escolher · [Enter] executar · [Esc] fechar"))
+	case overlayHelp:
+		lines = []string{
+			sBold.Render("Ajuda contextual"),
+			"F1–F10 módulos · Ctrl+K paleta · / filtrar configs · ? ajuda · Esc voltar",
+			"Enter/c conectar · ↑↓/jk navegar · i importar · p processos · w WFP · l apps",
+			"s sistema inteiro · n DNS · b melhor rota · v endpoint · h multipath WARP",
+			"m espelho DPS · u duplicação · r proporção · f forçar UDP · o/a ordem UDP",
+			"x autoteste · g diagnóstico · e exportar · t alvo ping · d remover · q sair",
+			sDim.Render("Os atalhos legados continuam ativos; o backend mostrado é o estado real."),
+		}
+	}
+	return sBox.Width(w).Render(strings.Join(lines, "\n"))
 }
 
 // log shows a UI line and records it in the file log.
@@ -205,6 +499,77 @@ func pushHist(h []float64, v float64) []float64 {
 		h = h[len(h)-60:]
 	}
 	return h
+}
+
+func (m model) updateOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.overlay {
+	case overlayHelp:
+		if msg.String() == "esc" || msg.String() == "?" {
+			m.overlay = overlayNone
+		}
+		return m, nil
+	case overlayPalette:
+		switch msg.String() {
+		case "esc":
+			m.overlay = overlayNone
+			m.input.Blur()
+		case "up", "shift+tab":
+			if m.palette > 0 {
+				m.palette--
+			}
+		case "down", "tab":
+			items := m.filteredCommands()
+			if m.palette < len(items)-1 {
+				m.palette++
+			}
+		case "enter":
+			items := m.filteredCommands()
+			if m.palette >= 0 && m.palette < len(items) {
+				items[m.palette].run(&m)
+			}
+			m.overlay = overlayNone
+			m.input.Blur()
+		default:
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			m.palette = clampCursor(m.palette, len(m.filteredCommands()))
+			return m, cmd
+		}
+	}
+	return m, nil
+}
+
+func screenForFunctionKey(key string) (uiScreen, bool) {
+	switch key {
+	case "f1":
+		return screenDashboard, true
+	case "f2":
+		return screenProcesses, true
+	case "f3":
+		return screenTunnels, true
+	case "f4":
+		return screenRoutes, true
+	case "f5":
+		return screenWFP, true
+	case "f6":
+		return screenUDP, true
+	case "f7":
+		return screenWarp, true
+	case "f8":
+		return screenLatency, true
+	case "f9":
+		return screenDiagnostics, true
+	case "f10":
+		return screenSettings, true
+	}
+	return screenDashboard, false
+}
+
+func (m *model) startSearch() {
+	m.mode = modeSearch
+	m.input.SetValue(m.filter)
+	m.input.Placeholder = "filtrar configurações"
+	m.input.Focus()
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -290,10 +655,38 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.overlay != overlayNone {
+			return m.updateOverlay(msg)
+		}
 		if m.mode != modeNormal {
 			return m.updateInput(msg)
 		}
+		if s, ok := screenForFunctionKey(msg.String()); ok {
+			m.setScreen(s)
+			return m, nil
+		}
 		switch msg.String() {
+		case "ctrl+k":
+			m.overlay, m.palette = overlayPalette, 0
+			m.input.SetValue("")
+			m.input.Placeholder = "pesquisar comandos"
+			m.input.Focus()
+			return m, nil
+		case "?":
+			m.overlay = overlayHelp
+			return m, nil
+		case "/":
+			m.startSearch()
+			return m, nil
+		case "tab":
+			m.setScreen(uiScreen((int(m.screen) + 1) % len(screenLabels)))
+			return m, nil
+		case "shift+tab":
+			m.setScreen(uiScreen((int(m.screen) + len(screenLabels) - 1) % len(screenLabels)))
+			return m, nil
+		case "esc":
+			m.backScreen()
+			return m, nil
 		case "ctrl+c", "q":
 			if m.eng != nil {
 				m.eng.Close()
@@ -606,6 +999,21 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.settings.PingTarget = v
 			_ = saveSettings(m.settings)
 			m.log("Alvo de ping salvo (vale na próxima conexão)")
+		case modeSearch:
+			m.filter = v
+			if m.filter != "" {
+				for i, name := range m.configs {
+					if strings.Contains(strings.ToLower(name), strings.ToLower(m.filter)) {
+						m.cursor = i
+						break
+					}
+				}
+			}
+			if m.filter == "" {
+				m.log("Filtro limpo")
+			} else {
+				m.log("Filtro de configurações: %s", m.filter)
+			}
 		}
 		m.mode = modeNormal
 		m.input.Blur()
@@ -865,6 +1273,9 @@ func row(label, value string) string {
 // View renders the densest-needed layout: full detail when it fits the
 // terminal height, otherwise three more compact levels (see render).
 func (m model) View() string {
+	if m.overlay != overlayNone {
+		return m.overlayView()
+	}
 	out := m.render(0)
 	for level := 1; level <= 3 && m.height > 0 && lipgloss.Height(out) > m.height; level++ {
 		out = m.render(level)
@@ -906,7 +1317,7 @@ func (m model) render(level int) string {
 	if gap < 1 {
 		gap = 1
 	}
-	header := title + strings.Repeat(" ", gap) + status
+	header := title + strings.Repeat(" ", gap) + status + "\n" + m.navTabs()
 
 	// status panel
 	var stat []string
@@ -1064,6 +1475,9 @@ func (m model) render(level int) string {
 		cfg = append(cfg, sDim.Render("(nenhuma — [i] para importar)"))
 	}
 	for i, c := range m.configs {
+		if m.filter != "" && !strings.Contains(strings.ToLower(c), strings.ToLower(m.filter)) {
+			continue
+		}
 		if level >= 1 && m.eng != nil && i != m.cursor {
 			continue // connected and short of room: only the selected config
 		}
@@ -1081,6 +1495,9 @@ func (m model) render(level int) string {
 		}
 		cfg = append(cfg, mark+line)
 	}
+	if len(cfg) == 0 && m.filter != "" {
+		cfg = append(cfg, sDim.Render("nenhuma configuração corresponde ao filtro"))
+	}
 
 	box := func(title string, lines []string) string {
 		t := lipgloss.NewStyle().Foreground(cAccent).Bold(true).Render(title)
@@ -1096,6 +1513,9 @@ func (m model) render(level int) string {
 		routeMax = 4
 	}
 	parts := []string{header, box("Status", stat)}
+	if m.screen != screenDashboard {
+		parts = append(parts, box(screenLabels[m.screen], m.moduleLines()))
+	}
 	if m.eng != nil {
 		routeLn := routeLinesMax(m.stats, routeMax)
 		if level >= 3 {
@@ -1165,6 +1585,8 @@ func (m model) render(level int) string {
 		foot = sBold.Render("Proporcao UDP (X = 1:X, X:X = rajada; X 1..8): ") + m.input.View() + sDim.Render("  [Enter] ok  [Esc] cancelar")
 	case modeEndpoint:
 		foot = sBold.Render("Novo endpoint (IP ou IP:porta): ") + m.input.View() + sDim.Render("  [Enter] ok  [Esc] cancelar")
+	case modeSearch:
+		foot = sBold.Render("Filtro: ") + m.input.View() + sDim.Render("  [Enter] aplicar  [Esc] cancelar")
 	case modeDelete:
 		foot = lipgloss.NewStyle().Foreground(cRed).Bold(true).Render(
 			fmt.Sprintf("Remover %s? [s/y] sim  [qualquer tecla] não", m.configs[m.cursor]))
@@ -1179,12 +1601,16 @@ func (m model) render(level int) string {
 			act = "desconectar"
 		}
 		foot = lipgloss.NewStyle().Width(w).Render(strings.Join([]string{
+			k("F1–F10", "módulos"), k("Ctrl+K", "comandos"), k("/", "filtrar"), k("?", "ajuda"),
 			k("Enter", act), k("i", "importar"), k("↑↓", "escolher"), k("p", "processos"),
 			k("w", "WFP"), k("l", "apps WFP"),
 			k("s", "sistema inteiro"), k("n", "DNS túnel"), k("b", "melhor rota"), k("v", "trocar endpoint"), k("m", "espelho DPS"), k("u", "dup UDP"), k("r", "proporcao"), k("f", "forcar UDP"), k("o", "envio recente"), k("a", "chegada recente"), k("x", "autoteste"), k("g", "diagnóstico"), k("e", "exportar p/ WG oficial"), k("t", "alvo do ping"), k("d", "remover"), k("q", "sair"),
 		}, "  "))
 	}
 
+	if m.mode == modeNormal && level >= 2 {
+		foot = sDim.Render("F1–F10 módulos · Ctrl+K comandos · / filtro · ? ajuda · Tab navega · Enter conecta · q sai")
+	}
 	// logs: fill remaining height (log box = 2 borders + title)
 	logN := 6
 	if m.height > 0 {

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -60,5 +61,29 @@ func TestViewFitsTerminalHeight(t *testing.T) {
 				t.Errorf("%dx%d: endpoint %s is not visible", sz[0], sz[1], path.Endpoint)
 			}
 		}
+	}
+}
+
+func TestModernNavigationMappings(t *testing.T) {
+	tests := map[string]uiScreen{
+		"f1": screenDashboard, "f2": screenProcesses, "f3": screenTunnels,
+		"f4": screenRoutes, "f5": screenWFP, "f6": screenUDP,
+		"f7": screenWarp, "f8": screenLatency, "f9": screenDiagnostics,
+		"f10": screenSettings,
+	}
+	for key, want := range tests {
+		got, ok := screenForFunctionKey(key)
+		if !ok || got != want {
+			t.Errorf("%s: got %v, %v; want %v, true", key, got, ok, want)
+		}
+	}
+}
+
+func TestCommandPaletteFiltersWithoutChangingActions(t *testing.T) {
+	m := model{input: textinput.New()}
+	m.input.SetValue("warp")
+	items := m.filteredCommands()
+	if len(items) != 1 || items[0].name != "WARP e endpoints" {
+		t.Fatalf("filtered commands = %#v", items)
 	}
 }
