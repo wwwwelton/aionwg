@@ -24,3 +24,11 @@ func TestGeoAskGetsTheAnswerThroughTheTunnel(t *testing.T) {
 		t.Fatalf("got %q %v", got, ok)
 	}
 }
+
+func TestWGStatsLoopStopsWithEngine(t *testing.T) {
+	e := &Engine{stop: make(chan struct{})}
+	e.wg.Add(1)
+	go e.wgStatsLoop()
+	close(e.stop)
+	e.wg.Wait()
+}
