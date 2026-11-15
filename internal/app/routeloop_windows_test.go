@@ -70,4 +70,3 @@ func routeFixture(t *testing.T) (e *Engine, a, b netip.AddrPort, logs func() str
 	e.learned = map[netip.AddrPort]bool{a: true, b: true}
 	return e, a, b, func() string { mu.Lock(); defer mu.Unlock(); return sb.String() }
 }
-
