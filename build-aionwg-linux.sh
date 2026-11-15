@@ -78,8 +78,8 @@ if ((UNVERIFIED)); then
   export GOPROXY=direct GOSUMDB=off
   info 'AVISO: GOSUMDB=off; checksums de dependências não serão verificados.'
 fi
-PKG_NAME="$(go list -f '{{.Name}}' .)" || fail 'go list falhou'
-[[ "$PKG_NAME" == 'main' ]] || fail "pacote raiz '$PKG_NAME' não é main"
+PKG_NAME="$(go list -f '{{.Name}}' ./cmd/aionwg)" || fail 'go list falhou'
+[[ "$PKG_NAME" == 'main' ]] || fail "cmd/aionwg '$PKG_NAME' não é main"
 mkdir -p dist
 TMP_EXE="$(mktemp "$SOURCE_DIR/dist/.AionWG.XXXXXXXX.exe")"
 STAGE_DIR=''
@@ -89,7 +89,7 @@ cleanup() {
 }
 trap cleanup EXIT
 info 'Compilando: GOOS=windows GOARCH=amd64 CGO_ENABLED=0...'
-go build -trimpath -ldflags='-s -w' -o "$TMP_EXE" .
+go build -trimpath -ldflags='-s -w' -o "$TMP_EXE" ./cmd/aionwg
 [[ -s "$TMP_EXE" ]] || fail 'o go build não gerou executável válido'
 mv -f "$TMP_EXE" dist/AionWG.exe
 TMP_EXE=''
@@ -116,7 +116,7 @@ for f in WinDivert.dll WinDivert64.sys wintun.dll WinDivert-LICENSE.txt shugo-co
     candidate="$(find "$ASSETS_DIR" -maxdepth 5 -type f -name "$f" -print -quit)"
     if [[ -n "$candidate" ]]; then cp "$candidate" "$out"; continue; fi
   fi
-  for folder in "$SOURCE_DIR" "$SOURCE_DIR/dist" "$(dirname "$(readlink -f "$0")")"; do
+  for folder in "$SOURCE_DIR/internal/app" "$SOURCE_DIR" "$SOURCE_DIR/dist" "$(dirname "$(readlink -f "$0")")"; do
     if [[ -f "$folder/$f" ]]; then cp "$folder/$f" "$out"; break; fi
   done
 done

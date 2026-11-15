@@ -15,6 +15,11 @@ dist/
 !wintun.dll
 !shugo-compat.dll
 
+!internal/app/WinDivert.dll
+!internal/app/WinDivert64.sys
+!internal/app/wintun.dll
+!internal/app/shugo-compat.dll
+
 # Ruído do Windows.
 desktop.ini
 Thumbs.db

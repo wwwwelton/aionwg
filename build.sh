@@ -28,20 +28,20 @@ mkdir -p dist
 
 echo "==> Go: $(go version)"
 echo "==> Compilando dist/AionWG.exe ..."
-go build -trimpath -ldflags "-s -w" -o dist/AionWG.exe .
+go build -trimpath -ldflags "-s -w" -o dist/AionWG.exe ./cmd/aionwg
 
 echo "==> Verificando DLLs ao lado do executável ..."
 for f in WinDivert.dll WinDivert64.sys; do
-  if [ -f "dist/$f" ]; then
+  if [ -f "internal/app/$f" ]; then
     echo "    ok: $f"
   else
-    echo "    AVISO: dist/$f não encontrado (copie do pacote WinDivert 2.2.2)"
+    echo "    AVISO: internal/app/$f não encontrado (copie do pacote WinDivert 2.2.2)"
   fi
 done
-if [ -f dist/wintun.dll ]; then
+if [ -f internal/app/wintun.dll ]; then
   echo "    ok: wintun.dll"
 else
-  echo "    AVISO: dist/wintun.dll não encontrado (baixe wintun-0.14.1.zip em wintun.net)"
+  echo "    AVISO: internal/app/wintun.dll não encontrado (baixe wintun-0.14.1.zip em wintun.net)"
 fi
 
 echo "==> Pronto: $(pwd)/dist/AionWG.exe"

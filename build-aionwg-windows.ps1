@@ -136,16 +136,16 @@ try {
     Info "Codigo-fonte: $SourceDir"
     & $goExe version
     if ($LASTEXITCODE -ne 0) { throw 'go version falhou.' }
-    $package = & $goExe list -f '{{.Name}}' .
-    if ($LASTEXITCODE -ne 0 -or (($package -join '').Trim() -ne 'main')) { throw 'Pacote raiz Go nao e main (ou go list falhou). Confira go.mod e arquivos .go.' }
+    $package = & $goExe list -f '{{.Name}}' ./cmd/aionwg
+    if ($LASTEXITCODE -ne 0 -or (($package -join '').Trim() -ne 'main')) { throw 'cmd/aionwg nao e um pacote main (ou go list falhou). Confira go.mod e os arquivos da aplicacao.' }
 
     $dist = Join-Path $SourceDir 'dist'
     New-Item -ItemType Directory -Force -Path $dist | Out-Null
     $exe = Join-Path $dist 'AionWG.exe'
     $tmp = Join-Path $dist ('.AionWG-' + [guid]::NewGuid().ToString('N') + '.exe')
     try {
-        Info 'Compilando Windows x64: GOOS=windows GOARCH=amd64 CGO_ENABLED=0...'
-        & $goExe build -trimpath -ldflags '-s -w' -o $tmp .
+        Info 'Compilando Windows x64: GOOS=windows GOARCH=amd64 CGO_ENABLED=0 ./cmd/aionwg...'
+        & $goExe build -trimpath -ldflags '-s -w' -o $tmp ./cmd/aionwg
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $tmp -PathType Leaf)) { throw 'go build falhou.' }
         if ((Get-Item -LiteralPath $tmp).Length -le 0) { throw 'Binario compilado esta vazio.' }
         Move-Item -LiteralPath $tmp -Destination $exe -Force
@@ -164,7 +164,7 @@ try {
     try {
         Copy-Item -LiteralPath $exe -Destination $stage
         $assetNames = @('LICENSE','WinDivert.dll','WinDivert64.sys','wintun.dll','WinDivert-LICENSE.txt','shugo-compat.dll')
-        $assetFolders = @($AssetsDir, $SourceDir, $dist, $PSScriptRoot)
+        $assetFolders = @($AssetsDir, (Join-Path $SourceDir 'internal/app'), $SourceDir, $dist, $PSScriptRoot)
         if ($AssetsZip) {
             Add-Type -AssemblyName System.IO.Compression
             $archive = [IO.Compression.ZipFile]::OpenRead($AssetsZip)

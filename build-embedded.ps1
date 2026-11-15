@@ -2,16 +2,16 @@
 $ErrorActionPreference = 'Stop'
 Push-Location $PSScriptRoot
 try {
-    foreach ($file in @('WinDivert.dll','WinDivert64.sys','wintun.dll','WinDivert-LICENSE.txt','third_party/wireguard-go/LICENSE')) {
+    foreach ($file in @('internal/app/WinDivert.dll','internal/app/WinDivert64.sys','internal/app/wintun.dll','WinDivert-LICENSE.txt','third_party/wireguard-go/LICENSE')) {
         if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing embedding input: $file" }
     }
     $cc = Get-Command x86_64-w64-mingw32-gcc,gcc -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($cc) {
         $target = & $cc.Source -dumpmachine
         if ($LASTEXITCODE -ne 0 -or $target -notmatch '^x86_64-.*mingw32$') { throw 'Compiler must target Windows x64.' }
-        & $cc.Source -shared -O2 -Wall -Wextra -Werror -static-libgcc '-Wl,--nxcompat,--dynamicbase,--high-entropy-va' -o shugo-compat.dll native/shugo-compat.c
+        & $cc.Source -shared -O2 -Wall -Wextra -Werror -static-libgcc '-Wl,--nxcompat,--dynamicbase,--high-entropy-va' -o internal/app/shugo-compat.dll native/shugo-compat.c
         if ($LASTEXITCODE -ne 0) { throw 'Compatibility DLL build failed.' }
-    } elseif (Test-Path -LiteralPath shugo-compat.dll -PathType Leaf) {
+    } elseif (Test-Path -LiteralPath internal/app/shugo-compat.dll -PathType Leaf) {
         Write-Warning 'MinGW-w64 not found: embedding the existing shugo-compat.dll (not rebuilt from native/shugo-compat.c).'
     } else {
         throw 'MinGW-w64 gcc or a prebuilt shugo-compat.dll is required.'
@@ -23,7 +23,7 @@ try {
     try {
         $env:GOOS = 'windows'; $env:GOARCH = 'amd64'; $env:CGO_ENABLED = '0'
         New-Item -ItemType Directory -Force dist/standalone | Out-Null
-        go build -trimpath -ldflags '-s -w' -o dist/standalone/AionWG.exe .
+        go build -trimpath -ldflags '-s -w' -o dist/standalone/AionWG.exe ./cmd/aionwg
         if ($LASTEXITCODE -ne 0) { throw 'AionWG embedded build failed.' }
     } finally {
         $env:GOOS, $env:GOARCH, $env:CGO_ENABLED = $oldOS, $oldArch, $oldCGO

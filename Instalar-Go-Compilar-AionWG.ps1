@@ -128,11 +128,11 @@ try {
     Push-Location -LiteralPath $project
     try {
         Write-Host "[BUILD] Fonte: $project"
-        $name = & $goExe list -f '{{.Name}}' .
+        $name = & $goExe list -f '{{.Name}}' ./cmd/aionwg
         if ($LASTEXITCODE -ne 0 -or ($name -join '').Trim() -ne 'main') {
-            throw 'A raiz do projeto nao e um pacote main; verifique o projeto e execute a partir da pasta correta.'
+            throw 'cmd/aionwg nao e um pacote main; verifique o projeto e execute a partir da pasta correta.'
         }
-        & $goExe build -trimpath -ldflags '-s -w' -o $exe .
+        & $goExe build -trimpath -ldflags '-s -w' -o $exe ./cmd/aionwg
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $exe)) { throw 'go build falhou.' }
     } finally { Pop-Location }
 } finally {
@@ -148,7 +148,7 @@ if (-not $NoPackage) {
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
     try {
         Copy-Item -LiteralPath $exe -Destination $stage
-        $assets = @('WinDivert.dll', 'WinDivert64.sys', 'wintun.dll', 'WinDivert-LICENSE.txt', 'shugo-compat.dll')
+        $assets = @('LICENSE', 'WinDivert.dll', 'WinDivert64.sys', 'wintun.dll', 'WinDivert-LICENSE.txt', 'shugo-compat.dll')
         if ($AssetsZip) {
             Add-Type -AssemblyName System.IO.Compression
             $archive = [IO.Compression.ZipFile]::OpenRead($AssetsZip)
@@ -171,8 +171,13 @@ if (-not $NoPackage) {
             }
         } else {
             foreach ($asset in $assets) {
-                $candidate = Join-Path $dist $asset
-                if (Test-Path -LiteralPath $candidate) { Copy-Item -LiteralPath $candidate -Destination $stage }
+                foreach ($folder in @((Join-Path $project 'internal/app'), $dist, $project)) {
+                    $candidate = Join-Path $folder $asset
+                    if (Test-Path -LiteralPath $candidate) {
+                        Copy-Item -LiteralPath $candidate -Destination $stage
+                        break
+                    }
+                }
             }
         }
         foreach ($required in @('WinDivert.dll','WinDivert64.sys','wintun.dll')) {
