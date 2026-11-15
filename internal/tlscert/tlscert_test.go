@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// The embedded certificate is trusted as a root on user machines, so it must only
-// be able to vouch for signatures made with its own key.
+// The embedded certificate is public signing metadata, not a runtime trust anchor.
+// Keep it limited to a non-CA code-signing leaf.
 func TestEmbeddedCertificateIsANonCACodeSigningLeaf(t *testing.T) {
 	block, _ := pem.Decode(Cert)
 	if block == nil {

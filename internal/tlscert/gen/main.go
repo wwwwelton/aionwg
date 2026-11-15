@@ -1,10 +1,10 @@
 // Command gen creates the AionWG code-signing certificate and key in
-// internal/tlscert. cert.pem (public) is tracked and embedded in the EXE so the
-// program can offer to trust it; key.pem is the private key, kept out of git and
-// out of the EXE, and used only by the build to sign the EXE (Authenticode).
+// internal/tlscert. cert.pem (public) is tracked and embedded as build metadata;
+// key.pem is the private key, kept out of git and out of the EXE, and used only
+// by the build to sign the EXE (Authenticode).
 // The certificate has no practical expiry (notAfter 9999-12-31, RFC 5280's "no
-// well-defined expiration") and is meant to sign every build: keep key.pem safe,
-// because rotating it makes every machine trust a new certificate.
+// well-defined expiration") and is meant to sign every build: keep key.pem safe.
+// Rotating it requires distributing the new public certificate to verifiers.
 // The pair is reused when cert.pem is valid; pass -new to rotate it.
 // Run by build-embedded.sh and build-embedded.ps1 before every build.
 package main

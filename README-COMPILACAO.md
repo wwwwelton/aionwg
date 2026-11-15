@@ -106,13 +106,14 @@ O Npcap continua sendo instalado separadamente. Nenhum `.conf` é embutido.
 
 **Assinatura (Authenticode).** `internal/tlscert/cert.pem` é o certificado público
 de assinatura de código `AionWG Code Signing`, sem expiração prática (válido até
-9999-12-31) e o mesmo em todo build. Ele vai embutido no EXE só para o programa
-oferecer instalá-lo como raiz confiável. A chave privada `internal/tlscert/key.pem`
+9999-12-31), usado apenas pelo fluxo opcional de assinatura do build. O runtime
+não instala esse certificado em `Root`, `TrustedPublisher` ou qualquer outro
+repositório do Windows. A chave privada `internal/tlscert/key.pem`
 **não está no git nem no EXE**: o build a usa para assinar o EXE (SHA-256, sem
-timestamp, porque o certificado não expira). Faça backup de `key.pem`; sem ela o
-build sai sem assinatura e trocar o certificado (`go run ./internal/tlscert/gen -new`)
-faz toda máquina precisar confiar num certificado novo. O status da assinatura só
-vira `Valid` onde o certificado está instalado como raiz confiável.
+timestamp). Faça backup de `key.pem`; sem ela o build sai sem assinatura e trocar
+o certificado (`go run ./internal/tlscert/gen -new`) exige distribuir o novo
+certificado aos verificadores. A assinatura do EXE não cria assinatura Microsoft
+para drivers de kernel.
 
 O EXE novo ainda não foi validado em partida real com o relay Shugo embutido.
 

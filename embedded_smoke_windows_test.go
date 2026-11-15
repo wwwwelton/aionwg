@@ -13,8 +13,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func init() { certPromptEnabled = false }
-
 // requireAdmin skips tests that extract the runtime into Program Files and load
 // the WinDivert driver; the default build embeds both.
 func requireAdmin(t *testing.T) {
