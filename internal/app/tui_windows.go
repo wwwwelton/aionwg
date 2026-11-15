@@ -419,7 +419,7 @@ func (m model) moduleLines() []string {
 			row("WFP", fmt.Sprintf("%v", m.settings.WFP)),
 			row("Multipath", fmt.Sprintf("%v", m.settings.WarpMultipath)),
 			row("Relays próprios", strings.Join(m.settings.CustomRelays, ", ")),
-			row("Conta de teste [b]", valueOrDash(m.settings.ProbeConfig)+" · [B] escolhe o .conf da conta WARP gratuita"),
+			row("Conta de teste [b]", valueOrDash(m.settings.ProbeConfig)+" · [B] escolhe o .conf de teste (pode ser o mesmo do perfil)"),
 			row("Persistência", "settings.json; chaves não exibidas"),
 		}
 	}

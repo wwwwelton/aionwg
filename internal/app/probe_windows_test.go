@@ -3,6 +3,7 @@
 package app
 
 import (
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,13 +49,18 @@ func TestSetProbeConfigNeedsAnotherAccountOnTheSameServer(t *testing.T) {
 	if savedProbeConf(live) != nil {
 		t.Fatal("nothing is chosen automatically")
 	}
-	for _, bad := range []string{"same.conf", "otherVPN.conf"} {
-		if _, err := setProbeConfig(p(bad), live); err == nil {
-			t.Fatalf("%s must be refused", bad)
-		}
+	if _, err := setProbeConfig(p("otherVPN.conf"), live); err == nil {
+		t.Fatal("a file for another server must be refused")
 	}
 	if savedProbeConf(live) != nil {
 		t.Fatal("a refused file must not be stored")
+	}
+	// The same file as the live profile is accepted without an error and kept apart.
+	if name, err := setProbeConfig(p("same.conf"), live); err != nil || name != "same.conf" {
+		t.Fatalf("the same account must be accepted silently: name=%q err=%v", name, err)
+	}
+	if got := savedProbeConf(live); got == nil || string(got.PrivateKey) != string(live.PrivateKey) {
+		t.Fatalf("expected the same-key copy, got %v", got)
 	}
 	name, err := setProbeConfig(`"`+p("free.conf")+`"`, live)
 	if err != nil || name != "free.conf" {
@@ -67,11 +73,23 @@ func TestSetProbeConfigNeedsAnotherAccountOnTheSameServer(t *testing.T) {
 	if info, err := os.Stat(probeConfPath()); err != nil || info.Mode().Perm()&0o077 != 0 && os.PathSeparator == '/' {
 		t.Fatalf("probe copy must stay private: %v %v", info, err)
 	}
-	// Chosen file stops matching the live profile (user switched profile): unusable.
-	writeProbeTestConf(t, p("live2.conf"), probeTestKey('C'), probeTestKey('S'))
-	b2, _ := os.ReadFile(p("live2.conf"))
-	live2, _ := ParseConfig(string(b2))
-	if savedProbeConf(live2) != nil {
-		t.Fatal("the live key must never be used as the probe identity")
+}
+
+// On Cloudflare WARP the live key must not handshake from a second socket while
+// the game runs; on other servers (several connections per key) it may.
+func TestProbeConfWithTheLiveKeyIsHeldBackOnWarpDuringTheGame(t *testing.T) {
+	e, a, _, _ := routeFixture(t) // the fixture has a game flow
+	probeConfFn = func(live *WGConf) *WGConf { return live }
+	if e.probeConf() == nil {
+		t.Fatal("a non-WARP server accepts several connections per key")
 	}
+	e.epCur.Store(&[]netip.AddrPort{netip.MustParseAddrPort("162.159.192.1:2408")})
+	if e.probeConf() != nil {
+		t.Fatal("same key on WARP during the game would drop the live session")
+	}
+	e.nat = map[portKey]*natEntry{} // game stopped
+	if e.probeConf() == nil {
+		t.Fatal("with the game idle the probe may run")
+	}
+	_ = a
 }

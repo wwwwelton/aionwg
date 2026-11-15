@@ -19,18 +19,30 @@ var probeConfFn = savedProbeConf
 // account). It is not a tunnel profile and never appears in the profile list.
 func probeConfPath() string { return filepath.Join(appDir(), "probe.conf") }
 
-// A handshake with the live key from a second socket makes the server drop or
-// redirect the live session (observed: ~20 s of 85% loss), so a test is only
-// isolated with a different identity on the same server. Nothing is chosen or
-// created automatically.
+// probeUsable accepts any file for the same server key (same WARP network),
+// including the same file as the live profile: the user may choose it and no
+// error is shown. A file for another server could never handshake here.
 func probeUsable(live, c *WGConf) bool {
 	return live != nil && c != nil && len(live.Peers) > 0 && len(c.Peers) > 0 &&
-		!bytes.Equal(c.PrivateKey, live.PrivateKey) &&
 		bytes.Equal(c.Peers[0].PublicKey, live.Peers[0].PublicKey)
 }
 
-// savedProbeConf returns the chosen probe identity, or nil when none was chosen
-// or it cannot work with the live profile.
+// probeConf is the identity for endpoint tests (the private copy of the file
+// chosen for [b]), or nil when none is usable right now. Cloudflare WARP drops
+// the live session when the same key handshakes from a second socket (observed:
+// ~20 s of 85% loss), so on WARP the live key is not used while the game runs;
+// other servers accept several connections per key.
+func (e *Engine) probeConf() *WGConf {
+	c := probeConfFn(e.conf)
+	if c != nil && bytes.Equal(c.PrivateKey, e.conf.PrivateKey) && e.gameServer().IsValid() &&
+		len(warpSeeds(e.eps()[0].Addr())) > 0 {
+		return nil
+	}
+	return c
+}
+
+// savedProbeConf returns the chosen probe file, or nil when none was chosen or
+// it is for another server.
 func savedProbeConf(live *WGConf) *WGConf {
 	b, err := os.ReadFile(probeConfPath())
 	if err != nil {
@@ -56,7 +68,7 @@ func setProbeConfig(path string, live *WGConf) (string, error) {
 		return "", fmt.Errorf("config inválida: %w", err)
 	}
 	if live != nil && !probeUsable(live, c) {
-		return "", errors.New("precisa ser OUTRA conta WARP (chave privada diferente) no mesmo servidor do perfil em uso")
+		return "", errors.New("precisa ser uma config do mesmo servidor do perfil em uso (mesma chave pública do peer)")
 	}
 	if err := os.MkdirAll(appDir(), 0o700); err != nil {
 		return "", err

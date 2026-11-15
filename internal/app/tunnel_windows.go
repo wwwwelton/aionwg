@@ -1450,10 +1450,6 @@ func (e *Engine) SetUDPNewestIn(on bool) {
 
 func (e *Engine) SetFullTunnel(on bool) { e.full.Store(on) }
 
-// probeConf is the identity for endpoint tests (the file chosen for [b]), or
-// nil when none is usable.
-func (e *Engine) probeConf() *WGConf { return probeConfFn(e.conf) }
-
 func (e *Engine) SetNoDNS(off bool) { e.noDNS.Store(off) }
 
 // SetWFP switches WFP mode. Both calls only touch atomics and a mutex-guarded
