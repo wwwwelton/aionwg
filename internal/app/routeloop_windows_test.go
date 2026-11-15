@@ -71,6 +71,9 @@ func routeFixture(t *testing.T) (e *Engine, a, b netip.AddrPort, logs func() str
 	prev := probeConfFn
 	probeConfFn = func(*WGConf) *WGConf { return nil } // no other profile: tests never read the user's
 	t.Cleanup(func() { probeConfFn = prev })
+	prevICMP := icmpStreakFn
+	icmpStreakFn = func(netip.Addr, int) bool { return true } // loopback ICMP is not what these tests cover
+	t.Cleanup(func() { icmpStreakFn = prevICMP })
 	return e, a, b, func() string { mu.Lock(); defer mu.Unlock(); return sb.String() }
 }
 
@@ -198,5 +201,30 @@ func TestRouteLoopDoesNotSwitchWhenTheSeparateHandshakeFails(t *testing.T) {
 	time.Sleep(60 * time.Millisecond)
 	if e.skipped(dead) {
 		t.Fatal("the skip must expire")
+	}
+}
+
+// No handshake is attempted on an endpoint until ICMP answered 10 times in a row.
+func TestEndpointNeedsAnICMPStreakBeforeAnyHandshake(t *testing.T) {
+	t.Setenv("APPDATA", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	e, _, b, getLogs := routeFixture(t)
+	handshakes := 0
+	probeConfFn = func(live *WGConf) *WGConf { handshakes++; return live }
+	var asked int
+	icmpStreakFn = func(_ netip.Addr, n int) bool { asked = n; return false }
+	if !e.rejectByProbe(b) {
+		t.Fatal("an endpoint without a 10-echo streak must be rejected")
+	}
+	if asked != 10 || handshakes != 0 {
+		t.Fatalf("asked=%d handshakes=%d: the handshake must not start", asked, handshakes)
+	}
+	if !e.skipped(b) || !strings.Contains(getLogs(), "ICMP") {
+		t.Fatalf("expected a short skip and a log line:\n%s", getLogs())
+	}
+	icmpStreakFn = func(netip.Addr, int) bool { return true }
+	e.probeSkip = nil
+	if e.rejectByProbe(b) || handshakes != 1 {
+		t.Fatalf("with the streak the handshake test runs and passes: handshakes=%d", handshakes)
 	}
 }

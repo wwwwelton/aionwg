@@ -1736,6 +1736,39 @@ func icmpMedian(a netip.Addr) (time.Duration, bool) {
 	return rtts[len(rtts)/2], true
 }
 
+// icmpGateCount is how many echoes in a row must be answered before any
+// handshake is tried on an endpoint.
+const icmpGateCount = 10
+
+// icmpStreakFn is replaced in tests.
+var icmpStreakFn = icmpStreak
+
+// icmpStreak reports whether n consecutive echoes to a were all answered.
+func icmpStreak(a netip.Addr, n int) bool {
+	p, err := newIcmpPinger()
+	if err != nil {
+		return false
+	}
+	defer p.close()
+	for range n {
+		if _, code := p.ping(a, 800*time.Millisecond); code != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// icmpGate runs the ICMP check for ep; on failure ep is skipped for
+// probeRetryAfter and no handshake is attempted.
+func (e *Engine) icmpGate(ep netip.AddrPort) bool {
+	if icmpStreakFn(ep.Addr(), icmpGateCount) {
+		return true
+	}
+	e.skipTemporarily(ep)
+	e.routeLog("rota: %s não respondeu ICMP %d vezes seguidas; sem handshake, ignorado por %v", ep, icmpGateCount, probeRetryAfter)
+	return false
+}
+
 // icmpOnce is a single echo, used to sweep many addresses cheaply.
 func icmpOnce(a netip.Addr) (time.Duration, bool) {
 	p, err := newIcmpPinger()
@@ -1807,11 +1840,12 @@ func (e *Engine) skipped(ep netip.AddrPort) bool {
 	return ok
 }
 
-// rejectByProbe handshake-tests ep with the identity chosen for [b] (never the
-// live key). A failed test only skips ep for probeRetryAfter. It reports whether
-// ep must not be used now; with no chosen identity nothing is tested.
+// rejectByProbe checks ep before the tunnel may use it: first ICMP (icmpGate,
+// 10 echoes in a row), then a handshake with the identity chosen for [b] (never
+// the live key). A failed check only skips ep for probeRetryAfter. It reports
+// whether ep must not be used now; with no chosen identity no handshake is tried.
 func (e *Engine) rejectByProbe(ep netip.AddrPort) bool {
-	if e.skipped(ep) {
+	if e.skipped(ep) || !e.icmpGate(ep) {
 		return true
 	}
 	alt := e.probeConf()
@@ -2181,6 +2215,9 @@ func (e *Engine) discoverEndpoints() {
 	r := ranked[0]
 	if alt == nil && e.gameServer().IsValid() {
 		return // the game started meanwhile; a same-key probe would drop it
+	}
+	if !e.icmpGate(r.AddrPort) {
+		return // ICMP must answer 10 times in a row before any handshake
 	}
 	probeConf, probePeer := e.conf, p
 	if alt != nil {
