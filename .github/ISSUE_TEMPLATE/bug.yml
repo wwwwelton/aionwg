@@ -1,0 +1,33 @@
+name: Bug report
+description: Report a reproducible non-security problem
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include WireGuard private keys, `.conf` files, PFX files or unredacted logs. Use SECURITY.md for vulnerabilities.
+  - type: input
+    id: version
+    attributes:
+      label: AionWG version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Windows version, architecture, elevation, Go version if building, and WinDivert/Wintun/Npcap versions.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Exact steps and expected versus actual behavior. Redact sensitive network data.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Include relevant status and logs after removing keys, endpoints, IPs and usernames.

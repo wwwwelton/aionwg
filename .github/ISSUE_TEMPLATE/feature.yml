@@ -1,0 +1,23 @@
+name: Feature request
+description: Propose a focused, evidence-backed improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user-visible problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Smallest compatible behavior and affected Windows/runtime constraints.
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and validation
+      description: TUI shortcuts, profile/settings compatibility, packet/driver risks and how it could be tested.

@@ -22,11 +22,14 @@ O projeto atual é Go para Windows, com Bubble Tea, wireguard-go vendorizado, Wi
 7. Wintun é usado pelo medidor `AionWG-Meter`, não como caminho principal do túnel.
 8. WARP alternativo usa sessões UDP adicionais. Multipath passou a ser opt-in; o padrão é uma sessão.
 
-### Conclusão técnica
+### Conclusão técnica atual
 
 - **Legacy WinDivert:** caminho de dados real e operacional.
-- **Hybrid atual:** classificação/observação SOCKET baseada em WFP ALE + captura/reinjeção NETWORK via WinDivert. É híbrido funcional, mas não substitui o driver de dados.
-- **Native WFP:** não implementado. Declarar esse estado como ativo sem driver, filtros, instalação e validação no Windows seria incorreto.
+- **Hybrid atual:** classificação/observação SOCKET baseada em WFP ALE + captura/reinjeção NETWORK via WinDivert.
+- **Native WFP User Mode Policy:** provider, sublayer, sessão dinâmica e filtros ALE `BLOCK` por App ID implementados via `fwpuclnt.dll`; ainda requer validação em Windows 11 elevado.
+- **Native WFP Kernel Packet Engine:** não implementado. Não há callout WDK, INF, CAT, assinatura ou IOCTL.
+
+O mecanismo nativo de políticas não substitui a captura/reinjeção WinDivert. O backend honesto atual é `Native WFP User Mode Policy + WinDivert NETWORK`.
 
 ## Inventário de atalhos atuais
 

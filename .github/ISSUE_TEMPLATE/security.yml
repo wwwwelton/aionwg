@@ -1,0 +1,14 @@
+name: Security report
+description: Route a security concern to private reporting
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not disclose details, credentials or exploit code publicly. Follow SECURITY.md and use GitHub private vulnerability reporting when enabled.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Non-sensitive summary
+      description: Provide only a high-level description here if private reporting is unavailable.
+    validations:
+      required: true
