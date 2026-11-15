@@ -21,10 +21,9 @@ import (
 )
 
 const (
-	routeMargin  = 5 * time.Millisecond // direct-leg gain that justifies a trial
-	gameGain     = 2 * time.Millisecond // game-ping gain needed to keep a switch
-	minPingRTTs  = 5                    // samples needed for a median
-	routeMaxLoss = 0.20                 // do not disturb a degraded/unstable live route
+	routeMargin = 5 * time.Millisecond // direct-leg gain that justifies a trial
+	gameGain    = 2 * time.Millisecond // game-ping gain needed to keep a switch
+	minPingRTTs = 5                    // samples needed for a median
 )
 
 // Timing is a variable only so tests can shrink it.
@@ -54,10 +53,6 @@ func pickRoute(curLeg time.Duration, legs map[netip.AddrPort]time.Duration) (net
 // improved by gameGain; an unknown measurement counts as "not proven better".
 func keepRoute(before, after time.Duration) bool {
 	return before > 0 && after > 0 && before-after >= gameGain
-}
-
-func routeBaselineReady(rtt time.Duration, loss float64) bool {
-	return rtt > 0 && loss <= routeMaxLoss
 }
 
 // medianRTT is the median of s, or 0 with fewer than minPingRTTs samples.

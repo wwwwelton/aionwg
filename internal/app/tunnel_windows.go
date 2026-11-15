@@ -480,10 +480,6 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 	}
 	e.wg.Add(1)
 	go func() { defer e.wg.Done(); e.scanLoop(opt.BestEndpoint) }()
-	if opt.BestEndpoint {
-		e.wg.Add(1)
-		go func() { defer e.wg.Done(); e.routeLoop() }()
-	}
 	if opt.CWBSearch {
 		e.wg.Add(1)
 		go func() { defer e.wg.Done(); e.cwbLoop() }()
@@ -1800,16 +1796,6 @@ func (e *Engine) gamePing() time.Duration {
 	return 0
 }
 
-func (e *Engine) gameLoss() float64 {
-	e.pingMu.Lock()
-	defer e.pingMu.Unlock()
-	if ps := e.pings[pingIDGame]; ps != nil {
-		return ps.result().Loss
-	}
-	return 0
-
-}
-
 // nap sleeps d and reports false when the engine is stopping.
 func (e *Engine) nap(d time.Duration) bool {
 	select {
@@ -1817,79 +1803,6 @@ func (e *Engine) nap(d time.Duration) bool {
 		return false
 	case <-time.After(d):
 		return true
-	}
-}
-
-// routeLoop is the live route monitor (see routemon.go): it only acts while the
-// game has traffic, spaces attempts out, and keeps a switch only if the game
-// ping measured through the new path is better.
-func (e *Engine) routeLoop() {
-	tk := time.NewTicker(routeEvery)
-	defer tk.Stop()
-	var next time.Time
-	for {
-		select {
-		case <-e.stop:
-			return
-		case <-tk.C:
-		}
-		gs := e.gameServer()
-		if e.closing.Load() {
-			continue
-		}
-		if !gs.IsValid() {
-			continue // no game traffic: nothing to compare (new endpoints: scanLoop)
-		}
-		before := e.gamePing()
-		if !routeBaselineReady(before, e.gameLoss()) {
-			continue
-		}
-		if time.Now().Before(next) {
-			continue
-		}
-		cur := e.eps()[0]
-		curLeg, ok := legProbe(cur.Addr())
-		if !ok {
-			continue
-		}
-		legs := map[netip.AddrPort]time.Duration{}
-		for _, a := range e.learnedList() {
-			if a == cur || e.pathEndpointUsed(a) {
-				continue
-			}
-			if leg, ok := legProbe(a.Addr()); ok {
-				legs[a] = leg
-			}
-		}
-		alt, found := pickRoute(curLeg, legs)
-		if !found {
-			continue
-		}
-		e.routeLog("rota: testando %s (perna direta %v contra %v; ping do jogo atual %v)", alt, legs[alt], curLeg, before)
-		if err := e.SetEndpoint(alt); err != nil {
-			next = time.Now().Add(failCooldown)
-			continue
-		}
-		e.pingMu.Lock()
-		e.pings[pingIDGame] = &pingState{target: gs}
-		e.pingMu.Unlock()
-		select {
-		case <-e.stop:
-			return
-		case <-time.After(routeSettle):
-		}
-		if e.gameServer() != gs { // pingLoop switched target: the RTTs are not comparable
-			continue
-		}
-		after := e.gamePing()
-		if keepRoute(before, after) {
-			e.routeLog("rota: mantida %s — ping do jogo %v -> %v", alt, before, after)
-			next = time.Now().Add(routeCooldown)
-			continue
-		}
-		e.routeLog("rota: ping do jogo não melhorou (%v -> %v); voltando para %s", before, after, cur)
-		_ = e.SetEndpoint(cur)
-		next = time.Now().Add(failCooldown)
 	}
 }
 
