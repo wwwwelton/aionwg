@@ -184,10 +184,10 @@ func connectCmd(name string, s Settings) tea.Cmd {
 		eng, err := StartEngine(conf, EngineOptions{
 			Processes: s.Processes, PingTarget: s.PingTarget, Mirror: s.Mirror,
 			MirrorNoLoopback: s.MirrorNoLoopback,
-			UDPDuplicate: s.UDPDuplicate, UDPOriginals: s.UDPOriginals, UDPCopies: s.UDPCopies, UDPForce: s.UDPForce,
+			UDPDuplicate:     s.UDPDuplicate, UDPOriginals: s.UDPOriginals, UDPCopies: s.UDPCopies, UDPForce: s.UDPForce,
 			UDPNewestOut: s.UDPNewestOut, UDPNewestIn: s.UDPNewestIn,
 			FullTunnel: s.FullTunnel, NoDNS: s.NoDNS,
-			WFP: s.WFP, WFPApps: s.WFPApps, BestEndpoint: s.BestEndpoint, CWBSearch: s.CWBSearch,
+			WFP: s.WFP, WFPApps: s.WFPApps, BestEndpoint: s.BestEndpoint, WarpMultipath: s.WarpMultipath, CWBSearch: s.CWBSearch,
 			ConfigPath:  filepath.Join(configDir(), name),
 			ConfigPaths: mirrorPaths,
 		}, func(f string, a ...any) {
@@ -379,6 +379,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.log("Melhor endpoint LIGADO — vale na próxima conexão (descobre e mede endpoints por ICMP, confirma por handshake)")
 			} else {
 				m.log("Melhor endpoint DESLIGADO — vale na próxima conexão (usa o endpoint da config)")
+			}
+		case "h":
+			m.settings.WarpMultipath = !m.settings.WarpMultipath
+			_ = saveSettings(m.settings)
+			if m.settings.WarpMultipath {
+				m.log("Multipath WARP LIGADO — vale na próxima conexão; pode gerar saídas públicas diferentes")
+			} else {
+				m.log("Multipath WARP DESLIGADO — uma sessão por padrão")
 			}
 		case "g":
 			m.showDiag = !m.showDiag
@@ -971,6 +979,11 @@ func (m model) render(level int) string {
 			br = lipgloss.NewStyle().Foreground(cGreen).Render("ligado") + sDim.Render(" ([b] desliga) · descobre e confirma candidatos após conectar")
 		}
 		stat = append(stat, row("Melhor rota", br))
+		mp := sDim.Render("desligado ([h] liga)")
+		if m.settings.WarpMultipath {
+			mp = lipgloss.NewStyle().Foreground(cYellow).Render("ligado (experimental)  ([h] desliga)")
+		}
+		stat = append(stat, row("Multipath WARP", mp))
 		md := "só jogo  ([s] muda para sistema inteiro)"
 		if m.settings.FullTunnel {
 			md = "sistema inteiro  ([s] muda para só jogo)"

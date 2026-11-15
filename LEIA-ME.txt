@@ -30,6 +30,8 @@ Teclas
            endpoints conhecidos a cada 30 s; testa uma troca e só a mantém se
            o ping do jogo melhorar. Com o jogo parado, procura novos endpoints a
            cada 10 s e confirma candidatos por handshake.
+  [h]      liga/desliga multipath WARP (vale na próxima conexão; desligado
+           por padrão para evitar sessões independentes e saídas públicas diferentes)
   [v]      troca o endpoint principal durante a conexão (IP ou IP:porta).
            A alteração não é gravada no .conf. Endpoints já usados pelos outros
            caminhos UDP não podem ser escolhidos para o principal.
@@ -59,25 +61,24 @@ IMPORTANTE
     (wg-easy, PiVPN, scripts "wireguard-install" já fazem). O AllowedIPs da
     config deve cobrir os IPs do jogo (0.0.0.0/0 é o mais simples).
 
-Quatro caminhos UDP do WARP
-  Para um perfil WARP com um peer, o AionWG cria quatro sessões WireGuard em
-  sockets UDP e endpoints distintos. A primeira usa o endpoint do .conf; as
-  demais usam endpoints aprendidos ou candidatos WARP. Outros perfis continuam
-  com o único caminho configurado.
+Multipath WARP ([h])
+  Desligado por padrão. Quando ligado, para um perfil WARP com um peer, o
+  AionWG cria quatro sessões WireGuard em sockets UDP e endpoints distintos.
+  A primeira usa o endpoint do .conf; as demais usam endpoints aprendidos ou
+  candidatos WARP. Outros perfis continuam com o único caminho configurado.
   Os caminhos adicionais são sondados um de cada vez, a intervalos de 10 s,
   por ICMP até o DNS da Cloudflare através do túnel.
   A linha "Caminhos UDP" mostra o endpoint e só informa sucesso após resposta
   de dados pelo túnel; o tempo após a barra indica há quanto tempo ela chegou.
   O estado expira após 75 s; handshake isolado não comprova o funcionamento.
   Um caminho sem resposta pode ser substituído por outro candidato.
-  Novos fluxos são distribuídos entre os caminhos que respondem. Um fluxo usa
-  o mesmo caminho enquanto ele responde; se parar, o principal é usado. Com
-  [u] ligado, as cópias UDP podem usar os outros caminhos ativos.
+  Novos fluxos são distribuídos entre os caminhos que respondem. Com [u]
+  ligado, as cópias UDP podem usar os outros caminhos ativos.
   As quatro sessões usam a mesma chave e endereço do perfil: a Cloudflare pode
-  não aceitar sessões simultâneas independentes ou pode limitá-las. Os
-  endpoints podem compartilhar a mesma saída, e cópias em caminhos diferentes
-  podem chegar ao jogo com IPs públicos distintos. Não há garantia de ping
-  menor; monitore os estados e desligue [u] se houver instabilidade.
+  não aceitar sessões simultâneas independentes ou pode limitá-las. Os endpoints
+  podem compartilhar a mesma saída, e cópias em caminhos diferentes podem chegar
+  ao jogo com IPs públicos distintos. Não há garantia de ping menor; monitore os
+  estados e desligue [h] se houver instabilidade.
 
 Modo sistema inteiro ([s])
   Todo o tráfego do PC passa pelo túnel, como um VPN normal. Continua direto:

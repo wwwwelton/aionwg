@@ -15,24 +15,25 @@ import (
 )
 
 type Settings struct {
-	Processes    []string `json:"processes"`
-	PingTarget   string   `json:"ping_target"` // empty = auto (gateway of the tunnel subnet)
-	LastConfig   string   `json:"last_config"`
-	Version      int      `json:"version"`
-	Mirror       bool     `json:"mirror"`
-	MirrorNoLoopback bool `json:"mirror_no_loopback"` // skip the 127.0.0.1 TCP replay; the AionWG-Meter feed stays on
-	UDPDuplicate bool     `json:"udp_duplicate"`  // optional tunnel UDP clone; default OFF
-	UDPOriginals int      `json:"udp_originals"`  // A of A:B: every A originals release UDPCopies copies, 1..8
-	UDPCopies    int      `json:"udp_copies"`     // B of A:B: copies per group, 1..8
-	UDPForce     bool     `json:"udp_force"`      // duplicate even game UDP outside AllowedIPs, except LAN/DNS
-	UDPNewestOut bool     `json:"udp_newest_out"` // opt-in LIFO scheduling of primary game UDP outbound
-	UDPNewestIn  bool     `json:"udp_newest_in"`  // opt-in LIFO scheduling of primary game UDP inbound
-	NoDNS        bool     `json:"no_dns_tunnel"`  // full tunnel: keep Windows' own DNS
-	FullTunnel   bool     `json:"full_tunnel"`    // tunnel the whole system, not just the game // copy the game's TCP streams to 127.0.0.1 for DPS meters
-	WFP          bool     `json:"wfp"`            // WFP mode: tunnel only WFPApps, ignoring the port and full-tunnel modes
-	WFPApps      []string `json:"wfp_apps"`       // executables picked for WFP mode; kept apart from Processes so toggling WFP never loses either list
-	BestEndpoint bool     `json:"best_endpoint"`  // monitor faster endpoints while connected
-	CWBSearch    bool     `json:"cwb_search"`     // measure cwb* endpoints in idle rounds and switch to the lowest ping
+	Processes        []string `json:"processes"`
+	PingTarget       string   `json:"ping_target"` // empty = auto (gateway of the tunnel subnet)
+	LastConfig       string   `json:"last_config"`
+	Version          int      `json:"version"`
+	Mirror           bool     `json:"mirror"`
+	MirrorNoLoopback bool     `json:"mirror_no_loopback"` // skip the 127.0.0.1 TCP replay; the AionWG-Meter feed stays on
+	UDPDuplicate     bool     `json:"udp_duplicate"`      // optional tunnel UDP clone; default OFF
+	UDPOriginals     int      `json:"udp_originals"`      // A of A:B: every A originals release UDPCopies copies, 1..8
+	UDPCopies        int      `json:"udp_copies"`         // B of A:B: copies per group, 1..8
+	UDPForce         bool     `json:"udp_force"`          // duplicate even game UDP outside AllowedIPs, except LAN/DNS
+	UDPNewestOut     bool     `json:"udp_newest_out"`     // opt-in LIFO scheduling of primary game UDP outbound
+	UDPNewestIn      bool     `json:"udp_newest_in"`      // opt-in LIFO scheduling of primary game UDP inbound
+	NoDNS            bool     `json:"no_dns_tunnel"`      // full tunnel: keep Windows' own DNS
+	FullTunnel       bool     `json:"full_tunnel"`        // tunnel the whole system, not just the game // copy the game's TCP streams to 127.0.0.1 for DPS meters
+	WFP              bool     `json:"wfp"`                // WFP mode: tunnel only WFPApps, ignoring the port and full-tunnel modes
+	WFPApps          []string `json:"wfp_apps"`           // executables picked for WFP mode; kept apart from Processes so toggling WFP never loses either list
+	BestEndpoint     bool     `json:"best_endpoint"`      // monitor faster endpoints while connected
+	WarpMultipath    bool     `json:"warp_multipath"`     // WARP: open three extra sessions; default OFF
+	CWBSearch        bool     `json:"cwb_search"`         // measure cwb* endpoints in idle rounds and switch to the lowest ping
 }
 
 // Default AION 2 executable names. Check Task Manager → Details if the

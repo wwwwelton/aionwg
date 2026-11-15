@@ -85,6 +85,7 @@ type EngineOptions struct {
 	ConfigPath       string   // imported profile receiving learned WFP destinations
 	ConfigPaths      []string
 	BestEndpoint     bool // monitor and try faster endpoints while connected
+	WarpMultipath    bool // WARP: open three extra sessions; opt-in for this connection
 	CWBSearch        bool // pick the lowest-ping Curitiba endpoint, measured with a dummy target when no game runs
 }
 
@@ -420,7 +421,7 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 			}
 		}
 	}
-	if err := e.startUDPPaths(); err != nil {
+	if err := e.startUDPPaths(opt.WarpMultipath); err != nil {
 		e.Close()
 		return nil, err
 	}

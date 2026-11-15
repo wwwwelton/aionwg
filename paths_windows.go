@@ -17,9 +17,9 @@ type udpPathStatus struct {
 }
 
 // startUDPPaths leaves ordinary WireGuard profiles unchanged. WARP profiles
-// receive three additional sessions, each on its own endpoint and UDP socket.
-func (e *Engine) startUDPPaths() error {
-	if len(e.conf.Peers) != 1 || len(warpPathSeeds(e.eps()[0].Addr())) == 0 {
+// receive three additional sessions only when explicitly enabled.
+func (e *Engine) startUDPPaths(enabled bool) error {
+	if !enabled || len(e.conf.Peers) != 1 || len(warpPathSeeds(e.eps()[0].Addr())) == 0 {
 		return nil
 	}
 	learned := e.learnedList()

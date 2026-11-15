@@ -11,6 +11,21 @@ import (
 	"time"
 )
 
+func TestUDPPathsDisabledWhenOptOut(t *testing.T) {
+	e := &Engine{
+		conf: &WGConf{Peers: []PeerConf{{}}},
+	}
+	e.epCur.Store(&[]netip.AddrPort{netip.MustParseAddrPort("162.159.192.1:2408")})
+	if err := e.startUDPPaths(false); err != nil {
+		t.Fatal(err)
+	}
+	for i, p := range e.paths {
+		if p != nil {
+			t.Fatalf("path %d started while multipath was disabled", i)
+		}
+	}
+}
+
 func TestUDPPathsStartThreeDistinctAdditionalSockets(t *testing.T) {
 	client, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
@@ -29,7 +44,7 @@ func TestUDPPathsStartThreeDistinctAdditionalSockets(t *testing.T) {
 		logf: func(string, ...any) {},
 	}
 	e.epCur.Store(&[]netip.AddrPort{primary})
-	if err := e.startUDPPaths(); err != nil {
+	if err := e.startUDPPaths(true); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
