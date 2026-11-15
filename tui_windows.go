@@ -71,6 +71,8 @@ const (
 	modeEndpoint
 	modeEndpointPick
 	modeSearch
+	modeTunnelDuplicate
+	modeTunnelRename
 )
 
 type uiScreen int
@@ -296,25 +298,45 @@ func (m model) moduleLines() []string {
 		}
 		return lines
 	case screenTunnels:
+		name := selectedConfig(m.configs, m.cursor)
 		connected := sDim.Render("desconectado")
-		if m.eng != nil {
+		if m.eng != nil && name == m.engName {
 			connected = lipgloss.NewStyle().Foreground(cGreen).Render("conectado")
 		}
-		return []string{
+		lines := []string{
 			row("Perfis", fmt.Sprintf("%d configurações", len(m.configs))),
-			row("Selecionado", selectedConfig(m.configs, m.cursor)),
+			row("Selecionado", name),
 			row("Conectado", connected),
-			row("Endpoint", valueOrDash(s.Endpoint)),
-			row("Túnel", valueOrDash(s.TunnelAddr)),
 		}
+		if profile, err := NewTunnelManager(configDir()).Profile(name); err != nil {
+			lines = append(lines, row("Validação", lipgloss.NewStyle().Foreground(cRed).Render(err.Error())))
+		} else {
+			lines = append(lines,
+				row("Protocolo", profile.Protocol),
+				row("Endpoint", valueOrDash(profile.Endpoint)),
+				row("Interface", joinProfileValues(profile.Addresses)),
+				row("MTU", fmt.Sprintf("%d", profile.MTU)),
+				row("DNS", valueOrDash(joinProfileValues(profile.DNS))),
+				row("AllowedIPs", valueOrDash(joinProfileValues(profile.AllowedIPs))),
+				row("Keepalive", fmt.Sprintf("%ds", profile.Keepalive)),
+			)
+		}
+		if m.eng != nil && name == m.engName {
+			lines = append(lines, row("Handshake", stateValue(!s.Handshake.IsZero())+" · RX "+fmtBytes(s.WGRx)+" · TX "+fmtBytes(s.WGTx)))
+		}
+		return lines
 	case screenRoutes:
-		return []string{
+		lines := []string{
 			row("Backend", m.backendLabel()),
 			row("Endpoint", valueOrDash(s.Endpoint)),
 			row("Monitor", routeStatus(s)),
 			row("Rota", routeSummaryLine(s)),
 			row("Ação", sDim.Render("[b] melhor rota · [v] trocar endpoint · [t] alvo do ping")),
 		}
+		for _, candidate := range routeCandidates(s, m.settings.WarpMultipath) {
+			lines = append(lines, row(string(candidate.Kind), routeCandidateText(candidate)))
+		}
+		return lines
 	case screenWFP:
 		socket := "indisponível"
 		if s.WFPSocket {
@@ -421,6 +443,20 @@ func routeSummaryLine(s Stats) string {
 	return fmt.Sprintf("%d saltos diretos · %d no túnel · medido há %s", len(s.Route.Direct), len(s.Route.Tunnel), time.Since(s.Route.At).Round(time.Second))
 }
 
+func (m *model) beginTunnelInput(next mode, placeholder string) {
+	if m.screen != screenTunnels {
+		m.setScreen(screenTunnels)
+	}
+	if len(m.configs) == 0 {
+		m.log("Nenhum perfil para operar")
+		return
+	}
+	m.mode = next
+	m.input.SetValue("")
+	m.input.Placeholder = placeholder
+	m.input.Focus()
+}
+
 func (m model) commandItems() []commandItem {
 	screenCommand := func(s uiScreen) func(*model) {
 		return func(m *model) { m.setScreen(s) }
@@ -441,6 +477,20 @@ func (m model) commandItems() []commandItem {
 			m.input.SetValue("")
 			m.input.Placeholder = `C:\Users\voce\Downloads\vps.conf`
 			m.input.Focus()
+		}},
+		{"Duplicar perfil", "Ctrl+D", func(m *model) {
+			m.beginTunnelInput(modeTunnelDuplicate, "novo nome do perfil")
+		}},
+		{"Renomear perfil", "Ctrl+R", func(m *model) {
+			m.beginTunnelInput(modeTunnelRename, "novo nome do perfil")
+		}},
+		{"Validar perfil", "Ctrl+V", func(m *model) {
+			name := selectedConfig(m.configs, m.cursor)
+			if _, err := NewTunnelManager(configDir()).Profile(name); err != nil {
+				m.log("ERRO na validação de %s: %v", name, err)
+			} else {
+				m.log("Perfil %s válido; chaves não exibidas", name)
+			}
 		}},
 	}
 }
@@ -1042,6 +1092,42 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.eng.SetUDPRatio(a, b)
 			}
 			m.log("UDP %s: a cada %d originais, %d copia(s) direta(s)", udpRatioLabel(a, b), a, b)
+		case modeTunnelDuplicate:
+			source := selectedConfig(m.configs, m.cursor)
+			if err := NewTunnelManager(configDir()).Duplicate(source, v); err != nil {
+				m.log("ERRO ao duplicar %s: %v", source, err)
+			} else {
+				m.configs = listConfigs()
+				if name, err := profileFilename(v); err == nil {
+					for i, config := range m.configs {
+						if config == name {
+							m.cursor = i
+							break
+						}
+					}
+				}
+				m.log("Perfil duplicado: %s", v)
+			}
+		case modeTunnelRename:
+			source := selectedConfig(m.configs, m.cursor)
+			if m.eng != nil && source == m.engName {
+				m.log("Desconecte o perfil antes de renomeá-lo")
+				break
+			}
+			if err := NewTunnelManager(configDir()).Rename(source, v); err != nil {
+				m.log("ERRO ao renomear %s: %v", source, err)
+			} else {
+				m.configs = listConfigs()
+				if name, err := profileFilename(v); err == nil {
+					for i, config := range m.configs {
+						if config == name {
+							m.cursor = i
+							break
+						}
+					}
+				}
+				m.log("Perfil renomeado: %s → %s", source, v)
+			}
 		case modeEndpoint:
 			eng := m.eng
 			m.mode = modeNormal

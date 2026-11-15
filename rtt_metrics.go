@@ -1,6 +1,9 @@
 package main
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 func rttJitter(samples []time.Duration) time.Duration {
 	if len(samples) < 2 {
@@ -15,4 +18,17 @@ func rttJitter(samples []time.Duration) time.Duration {
 		total += delta
 	}
 	return total / time.Duration(len(samples)-1)
+}
+
+func rttPercentile(samples []time.Duration, percentile int) time.Duration {
+	if len(samples) == 0 || percentile <= 0 || percentile > 100 {
+		return 0
+	}
+	sorted := append([]time.Duration(nil), samples...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	index := (len(sorted)*percentile+99)/100 - 1
+	if index >= len(sorted) {
+		index = len(sorted) - 1
+	}
+	return sorted[index]
 }

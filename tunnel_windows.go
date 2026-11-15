@@ -110,6 +110,8 @@ type Diag struct {
 type PingResult struct {
 	Target string
 	RTT    time.Duration // 0 = no reply
+	P50    time.Duration
+	P95    time.Duration
 	Jitter time.Duration // mean absolute change between successful samples
 	OK     bool
 	Loss   float64 // 0..1 over the last 20 probes
@@ -279,7 +281,7 @@ type pingState struct {
 }
 
 func (s *pingState) result() PingResult {
-	r := PingResult{RTT: s.last, Jitter: rttJitter(s.rtts), OK: s.ok, Err: s.err}
+	r := PingResult{RTT: s.last, P50: rttPercentile(s.rtts, 50), P95: rttPercentile(s.rtts, 95), Jitter: rttJitter(s.rtts), OK: s.ok, Err: s.err}
 	if s.target.IsValid() {
 		r.Target = s.target.String()
 	}
