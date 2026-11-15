@@ -17,11 +17,11 @@ var geoResolver = netip.MustParseAddr("1.1.1.1")
 
 // scanLoop runs every discoverEvery: it keeps the exit location current and,
 // with the best-endpoint option, looks for a better endpoint. Candidates are
-// handshake-tested on a separate throwaway session, so the live tunnel is not
-// used for the test. A probe can still make the server talk to the probe's
-// socket until the live session speaks again, so with the game running probes
-// are spaced gameProbeEvery apart. Each candidate is probed at most once
-// (learned or discarded for days).
+// handshake-tested on a throwaway device with another saved profile's identity
+// (see otherProfileConf), because a test with the live key drops the live
+// session; without such a profile, tests only run while the game is idle. With
+// the game running searches are spaced gameProbeEvery apart. Each candidate is
+// probed at most once (learned or discarded for days).
 func (e *Engine) scanLoop(best bool) {
 	tk := time.NewTicker(discoverEvery)
 	defer tk.Stop()

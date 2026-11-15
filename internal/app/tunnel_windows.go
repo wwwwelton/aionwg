@@ -1865,9 +1865,10 @@ func (e *Engine) routeLoop() {
 		if !found {
 			continue
 		}
-		// The handshake is tested first on a throwaway device (separate session);
-		// the live tunnel only switches when that test succeeds.
-		if !probeHandshake(e.conf, e.conf.Peers[0], alt, 2*time.Second) {
+		// The handshake is tested on a throwaway device with another identity,
+		// so the live session is untouched; without one, no test (the switch
+		// still waits for the live handshake and reverts on failure).
+		if altConf := probeConfFn(e.conf, e.profile); altConf != nil && !probeHandshake(altConf, altConf.Peers[0], alt, 2*time.Second) {
 			_ = saveBad(routesPath(), e.profile, alt, time.Now())
 			e.routeLog("rota: %s falhou no handshake de teste (sessão separada); descartado por 7 dias", alt)
 			next = time.Now().Add(routeSettle)
@@ -2086,13 +2087,19 @@ func pingMs(p PingResult) int {
 }
 
 // discoverEndpoints looks for an endpoint faster than the current one. The
-// handshake is tested on a separate throwaway session, never on the live
-// tunnel. With no game traffic a successful candidate is switched to at once;
+// handshake is tested on a throwaway device, with another profile's identity
+// when one exists (otherwise only while the game is idle). With no game traffic a successful candidate is switched to at once;
 // while the game runs it is only learned, and routeLoop trials it by game ping.
 // It tries at most one candidate per call and remembers the result.
 func (e *Engine) discoverEndpoints() {
 	cur := e.eps()[0]
 	if !cur.Addr().Is4() || len(e.conf.Peers) == 0 {
+		return
+	}
+	// A handshake with the live key kills the live session, so with the game
+	// running only another identity may test endpoints.
+	alt := probeConfFn(e.conf, e.profile)
+	if alt == nil && e.gameServer().IsValid() {
 		return
 	}
 	p := e.conf.Peers[0]
@@ -2125,7 +2132,14 @@ func (e *Engine) discoverEndpoints() {
 		return // nothing faster
 	}
 	r := ranked[0]
-	if probeHandshake(e.conf, p, r.AddrPort, 2*time.Second) {
+	if alt == nil && e.gameServer().IsValid() {
+		return // the game started meanwhile; a same-key probe would drop it
+	}
+	probeConf, probePeer := e.conf, p
+	if alt != nil {
+		probeConf, probePeer = alt, alt.Peers[0]
+	}
+	if probeHandshake(probeConf, probePeer, r.AddrPort, 2*time.Second) {
 		e.learn(r.AddrPort)
 		// The handshake was proven on a throwaway device, so switching is safe
 		// now; SetEndpoint still confirms it live and reverts on failure.
