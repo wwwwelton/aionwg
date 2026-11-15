@@ -255,9 +255,10 @@ func (m model) moduleLines() []string {
 		}
 		return []string{
 			row("Política", "DEFAULT · lista atual preservada"),
+			row("Regras", formatProcessRules(m.settings)),
 			row("Túnel", procs),
 			row("WFP apps", fmt.Sprintf("%d selecionados · [l] editar", len(m.settings.WFPApps))),
-			row("Ação", sDim.Render("[p] editar lista · [l] selecionar apps WFP")),
+			row("Ação", sDim.Render("[p] editar regras · [l] selecionar apps WFP")),
 		}
 	case screenTunnels:
 		connected := sDim.Render("desconectado")
@@ -476,7 +477,7 @@ func connectCmd(name string, s Settings) tea.Cmd {
 			mirrorPaths = append(mirrorPaths, filepath.Join(filepath.Dir(exe), "configs-wireguard-oficial", name))
 		}
 		eng, err := StartEngine(conf, EngineOptions{
-			Processes: s.Processes, PingTarget: s.PingTarget, Mirror: s.Mirror,
+			Processes: s.Processes, ProcessRules: s.ProcessRules, PingTarget: s.PingTarget, Mirror: s.Mirror,
 			MirrorNoLoopback: s.MirrorNoLoopback,
 			UDPDuplicate:     s.UDPDuplicate, UDPOriginals: s.UDPOriginals, UDPCopies: s.UDPCopies, UDPForce: s.UDPForce,
 			UDPNewestOut: s.UDPNewestOut, UDPNewestIn: s.UDPNewestIn,
@@ -725,8 +726,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.input.Focus()
 		case "p":
 			m.mode = modeProcs
-			m.input.SetValue(strings.Join(m.settings.Processes, ", "))
-			m.input.Placeholder = "Aion2.exe, Aion2-Win64-Shipping.exe"
+			m.input.SetValue(formatProcessRules(m.settings))
+			m.input.Placeholder = "Aion2.exe, Discord.exe=BYPASS, malware.exe=BLOCK"
 			m.input.Focus()
 		case "t":
 			m.mode = modePing
@@ -952,21 +953,21 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case modeProcs:
-			var procs []string
-			for _, p := range strings.Split(v, ",") {
-				if p = strings.TrimSpace(p); p != "" {
-					procs = append(procs, p)
-				}
+			rules, procs, err := parseProcessRules(v)
+			if err != nil {
+				m.log("ERRO nas regras: %v", err)
+				return m, nil
 			}
-			if len(procs) == 0 {
-				procs = defaultProcesses
+			if len(rules) == 0 {
+				rules, procs, _ = parseProcessRules(strings.Join(defaultProcesses, ", "))
 			}
 			m.settings.Processes = procs
+			m.settings.ProcessRules = rules
 			_ = saveSettings(m.settings)
 			if m.eng != nil {
-				m.eng.SetProcesses(procs)
+				m.eng.SetProcessRules(rules, procs)
 			}
-			m.log("Processos-alvo: %s", strings.Join(procs, ", "))
+			m.log("Regras de processo: %s", formatProcessRules(m.settings))
 		case modeUDPCopies:
 			a, b, ok := parseUDPRatio(v)
 			if !ok {
@@ -1578,7 +1579,7 @@ func (m model) render(level int) string {
 	case modeImport:
 		foot = sBold.Render("Caminho do .conf: ") + m.input.View() + sDim.Render("  [Enter] ok  [Esc] cancelar")
 	case modeProcs:
-		foot = sBold.Render("Processos (separados por vírgula): ") + m.input.View()
+		foot = sBold.Render("Regras (nome ou nome=POLICY): ") + m.input.View() + sDim.Render("  TUNNEL/BYPASS/BLOCK/DEFAULT")
 	case modePing:
 		foot = sBold.Render("IP para ping no túnel: ") + m.input.View()
 	case modeUDPCopies:

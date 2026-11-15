@@ -110,3 +110,21 @@ func TestSettingsWFPDefaultsAndRoundTrip(t *testing.T) {
 		t.Fatalf("enabling WFP must not change the port/system settings: %+v", got)
 	}
 }
+
+func TestProcessRulesPersist(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+	s := Settings{
+		Processes:    []string{"Aion2.exe"},
+		ProcessRules: []ProcessRule{{Name: "Aion2.exe", Policy: PolicyTunnel}, {Name: "Discord.exe", Policy: PolicyBypass}},
+	}
+	if err := saveSettings(s); err != nil {
+		t.Fatal(err)
+	}
+	got := loadSettings()
+	if len(got.ProcessRules) != 2 || got.ProcessRules[1].Policy != PolicyBypass {
+		t.Fatalf("process rules lost: %+v", got.ProcessRules)
+	}
+}

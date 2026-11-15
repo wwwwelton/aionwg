@@ -69,6 +69,7 @@ func natKey(proto uint8, v6 bool, port uint16) portKey {
 // EngineOptions are the user settings the engine needs.
 type EngineOptions struct {
 	Processes        []string
+	ProcessRules     []ProcessRule
 	PingTarget       string
 	Mirror           bool
 	MirrorNoLoopback bool // skip the 127.0.0.1 TCP replay; AionWG-Meter feed unaffected
@@ -371,6 +372,7 @@ func StartEngine(conf *WGConf, opt EngineOptions, logf func(string, ...any)) (*E
 	h.setParam(2, 33554432) // queue size bytes
 
 	e.owner = newOwnerTracker(opt.Processes)
+	e.owner.SetRules(opt.ProcessRules, opt.Processes)
 	e.mirror = newMirror(opt.Mirror, logf)
 	e.mirror.trace = e.logDisk
 	e.mirror.noLoopback.Store(opt.MirrorNoLoopback)
@@ -579,7 +581,10 @@ func (e *Engine) capture(pkt []byte, addr *divertAddress) bool {
 		}
 	}
 	class, full := e.classify(p.proto, p.srcPort)
-	if class == classNone && !full {
+	if class == classBlock {
+		return true
+	}
+	if class == classBypass || (class == classNone && !full) {
 		return false
 	}
 	src, ok := e.tunAddr(p.v6)
@@ -1179,6 +1184,10 @@ func (e *Engine) Stats() Stats {
 }
 
 func (e *Engine) SetProcesses(names []string) { e.owner.SetNames(names) }
+
+func (e *Engine) SetProcessRules(rules []ProcessRule, names []string) {
+	e.owner.SetRules(rules, names)
+}
 
 // SetMirror must never block Bubble Tea's Update loop. Opening a Wintun
 // adapter can take seconds (or wait on a driver), and the resulting log callback

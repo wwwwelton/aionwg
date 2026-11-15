@@ -16,11 +16,49 @@ import (
 
 // Port owner classes.
 const (
-	classNone uint8 = iota // not in the list
-	classGame              // AION 2 (and anything listed that is not Steam)
-	classApp               // Steam (tunnelled, but not mirrored / not "the game")
-	classSelf              // AionWG itself (self-test traffic)
+	classNone   uint8 = iota // not selected
+	classGame                // AION 2 (and anything listed that is not Steam)
+	classApp                 // Steam/other selected app
+	classSelf                // AionWG itself (self-test traffic)
+	classBypass              // explicit user bypass rule
+	classBlock               // explicit user block rule
 )
+
+type ProcessPolicy string
+
+const (
+	PolicyDefault ProcessPolicy = "DEFAULT"
+	PolicyTunnel  ProcessPolicy = "TUNNEL"
+	PolicyBypass  ProcessPolicy = "BYPASS"
+	PolicyBlock   ProcessPolicy = "BLOCK"
+)
+
+type ProcessRule struct {
+	Name   string        `json:"name"`
+	Policy ProcessPolicy `json:"policy"`
+}
+
+func processPolicyClass(policy ProcessPolicy, name string) uint8 {
+	switch ProcessPolicy(strings.ToUpper(strings.TrimSpace(string(policy)))) {
+	case PolicyTunnel:
+		return classOfName(strings.ToLower(strings.TrimSpace(name)))
+	case PolicyBypass:
+		return classBypass
+	case PolicyBlock:
+		return classBlock
+	default:
+		return classNone
+	}
+}
+
+func validProcessPolicy(policy ProcessPolicy) bool {
+	switch ProcessPolicy(strings.ToUpper(strings.TrimSpace(string(policy)))) {
+	case PolicyDefault, PolicyTunnel, PolicyBypass, PolicyBlock:
+		return true
+	default:
+		return false
+	}
+}
 
 func classOfName(lower string) uint8 {
 	if strings.HasPrefix(lower, "steam") {
@@ -318,7 +356,7 @@ func resolveClass(
 	if !wfpOn {
 		return portClass(), full
 	}
-	if c := portClass(); c == classSelf {
+	if c := portClass(); c == classSelf || c == classBypass || c == classBlock {
 		return c, false
 	}
 	return wfpClass(), false

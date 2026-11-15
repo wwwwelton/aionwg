@@ -346,3 +346,29 @@ func TestClampCursor(t *testing.T) {
 		}
 	}
 }
+func TestProcessRulesParseAndFormat(t *testing.T) {
+	rules, tunnel, err := parseProcessRules("Aion2.exe, Discord.exe=BYPASS, malware.exe=BLOCK, helper.exe=DEFAULT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 4 || len(tunnel) != 1 || tunnel[0] != "Aion2.exe" {
+		t.Fatalf("rules=%+v tunnel=%v", rules, tunnel)
+	}
+	got := formatProcessRules(Settings{Processes: tunnel, ProcessRules: rules})
+	want := "Aion2.exe, Discord.exe=BYPASS, malware.exe=BLOCK, helper.exe=DEFAULT"
+	if got != want {
+		t.Fatalf("formatted rules %q, want %q", got, want)
+	}
+	if _, _, err := parseProcessRules("bad.exe=DROP"); err == nil {
+		t.Fatal("unknown process policy must fail")
+	}
+}
+
+func TestResolveClassPreservesExplicitProcessPoliciesInWFP(t *testing.T) {
+	for _, want := range []uint8{classBypass, classBlock} {
+		got, full := resolveClass(true, func() uint8 { return want }, true, func() uint8 { return classGame })
+		if got != want || full {
+			t.Fatalf("policy %d changed by WFP: got (%d,%v)", want, got, full)
+		}
+	}
+}

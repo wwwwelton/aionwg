@@ -62,11 +62,26 @@ func newOwnerTracker(names []string) *ownerTracker {
 }
 
 func (t *ownerTracker) SetNames(names []string) {
+	t.SetRules(nil, names)
+}
+
+func (t *ownerTracker) SetRules(rules []ProcessRule, names []string) {
 	m := map[string]uint8{}
 	for _, n := range names {
 		if n = strings.ToLower(strings.TrimSpace(n)); n != "" {
 			m[n] = classOfName(n)
 		}
+	}
+	for _, rule := range rules {
+		name := strings.ToLower(strings.TrimSpace(rule.Name))
+		if name == "" || !validProcessPolicy(rule.Policy) {
+			continue
+		}
+		policy := ProcessPolicy(strings.ToUpper(strings.TrimSpace(string(rule.Policy))))
+		if policy == PolicyDefault {
+			continue
+		}
+		m[name] = processPolicyClass(policy, name)
 	}
 	t.mu.Lock()
 	t.names = m
@@ -149,8 +164,12 @@ func (t *ownerTracker) scanProcesses() {
 			if _, ok := found[p.pid]; ok || p.pid == 0 || p.pid == p.ppid {
 				continue
 			}
-			if parent, ok := found[p.ppid]; ok && (parent.class == classGame || parent.child) {
-				found[p.pid] = procMeta{name: p.name, class: classApp, child: true}
+			if parent, ok := found[p.ppid]; ok && (parent.class == classGame || parent.class == classBlock || parent.child) {
+				childClass := classApp
+				if parent.class == classBlock {
+					childClass = classBlock
+				}
+				found[p.pid] = procMeta{name: p.name, class: childClass, child: true}
 				changed = true
 			}
 		}
