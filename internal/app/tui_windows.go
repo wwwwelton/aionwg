@@ -919,9 +919,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.settings.BestEndpoint = !m.settings.BestEndpoint
 			_ = saveSettings(m.settings)
 			if m.settings.BestEndpoint {
-				m.log("Melhor endpoint LIGADO — vale na próxima conexão (descobre e mede endpoints por ICMP, confirma por handshake)")
+				m.log("Melhor endpoint LIGADO — só testa trocas com ping do jogo válido e perda <=20%%; falhas revertem")
 			} else {
-				m.log("Melhor endpoint DESLIGADO — vale na próxima conexão (usa o endpoint da config)")
+				m.log("Melhor endpoint DESLIGADO — usa o endpoint da config; [v] continua disponível para troca manual")
 			}
 		case "h":
 			m.settings.WarpMultipath = !m.settings.WarpMultipath

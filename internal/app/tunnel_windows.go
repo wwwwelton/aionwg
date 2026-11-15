@@ -1800,6 +1800,16 @@ func (e *Engine) gamePing() time.Duration {
 	return 0
 }
 
+func (e *Engine) gameLoss() float64 {
+	e.pingMu.Lock()
+	defer e.pingMu.Unlock()
+	if ps := e.pings[pingIDGame]; ps != nil {
+		return ps.result().Loss
+	}
+	return 0
+
+}
+
 // nap sleeps d and reports false when the engine is stopping.
 func (e *Engine) nap(d time.Duration) bool {
 	select {
@@ -1830,6 +1840,10 @@ func (e *Engine) routeLoop() {
 		if !gs.IsValid() {
 			continue // no game traffic: nothing to compare (new endpoints: scanLoop)
 		}
+		before := e.gamePing()
+		if !routeBaselineReady(before, e.gameLoss()) {
+			continue
+		}
 		if time.Now().Before(next) {
 			continue
 		}
@@ -1851,7 +1865,6 @@ func (e *Engine) routeLoop() {
 		if !found {
 			continue
 		}
-		before := e.gamePing()
 		e.routeLog("rota: testando %s (perna direta %v contra %v; ping do jogo atual %v)", alt, legs[alt], curLeg, before)
 		if err := e.SetEndpoint(alt); err != nil {
 			next = time.Now().Add(failCooldown)

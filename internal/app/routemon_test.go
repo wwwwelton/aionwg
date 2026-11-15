@@ -41,6 +41,18 @@ func TestKeepRouteOnlyWhenGamePingProvablyImproved(t *testing.T) {
 	}
 }
 
+func TestRouteBaselineRequiresSamplesAndLowLoss(t *testing.T) {
+	if routeBaselineReady(0, 0) {
+		t.Fatal("route without a game RTT must not switch")
+	}
+	if routeBaselineReady(30*time.Millisecond, 0.21) {
+		t.Fatal("route with degraded loss must not switch")
+	}
+	if !routeBaselineReady(30*time.Millisecond, 0.20) {
+		t.Fatal("route at the loss threshold should remain eligible")
+	}
+}
+
 func TestMedianRTTNeedsEnoughSamples(t *testing.T) {
 	ms := time.Millisecond
 	if medianRTT([]time.Duration{ms, ms, ms, ms}) != 0 {
