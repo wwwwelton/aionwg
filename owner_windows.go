@@ -40,7 +40,8 @@ type procMeta struct {
 type ownerTracker struct {
 	mu          sync.Mutex
 	refreshMu   sync.Mutex
-	names       map[string]uint8 // lower-case exe name -> class
+	names       map[string]uint8 // lower-case exe names the user picked
+	paths       map[string]uint8 // normalized executable paths
 	pids        map[uint32]procMeta
 	cache       map[portKey]ownerEntry
 	lastRefresh time.Time
@@ -52,6 +53,7 @@ type ownerTracker struct {
 func newOwnerTracker(names []string) *ownerTracker {
 	t := &ownerTracker{
 		pids:    map[uint32]procMeta{},
+		paths:   map[string]uint8{},
 		cache:   map[portKey]ownerEntry{},
 		selfPID: uint32(os.Getpid()),
 		stop:    make(chan struct{}),
@@ -67,6 +69,7 @@ func (t *ownerTracker) SetNames(names []string) {
 
 func (t *ownerTracker) SetRules(rules []ProcessRule, names []string) {
 	m := map[string]uint8{}
+	p := map[string]uint8{}
 	for _, n := range names {
 		if n = strings.ToLower(strings.TrimSpace(n)); n != "" {
 			m[n] = classOfName(n)
@@ -74,17 +77,25 @@ func (t *ownerTracker) SetRules(rules []ProcessRule, names []string) {
 	}
 	for _, rule := range rules {
 		name := strings.ToLower(strings.TrimSpace(rule.Name))
-		if name == "" || !validProcessPolicy(rule.Policy) {
+		path := cleanProcessPath(rule.Path)
+		if (name == "" && path == "") || !validProcessPolicy(rule.Policy) {
 			continue
 		}
 		policy := ProcessPolicy(strings.ToUpper(strings.TrimSpace(string(rule.Policy))))
 		if policy == PolicyDefault {
 			continue
 		}
-		m[name] = processPolicyClass(policy, name)
+		class := processPolicyClass(policy, name)
+		if name != "" {
+			m[name] = class
+		}
+		if path != "" {
+			p[path] = class
+		}
 	}
 	t.mu.Lock()
 	t.names = m
+	t.paths = p
 	t.cache = map[portKey]ownerEntry{}
 	t.mu.Unlock()
 	t.scanProcesses()
@@ -139,6 +150,7 @@ func (t *ownerTracker) scanProcesses() {
 	defer windows.CloseHandle(snap)
 	t.mu.Lock()
 	names := t.names
+	paths := t.paths
 	t.mu.Unlock()
 	found := map[uint32]procMeta{}
 	type proc struct {
@@ -151,8 +163,16 @@ func (t *ownerTracker) scanProcesses() {
 	for err = windows.Process32First(snap, &pe); err == nil; err = windows.Process32Next(snap, &pe) {
 		name := windows.UTF16ToString(pe.ExeFile[:])
 		all = append(all, proc{pe.ProcessID, pe.ParentProcessID, name})
-		if c, ok := names[strings.ToLower(name)]; ok {
-			found[pe.ProcessID] = procMeta{name: name, class: c}
+		class, ok := names[strings.ToLower(name)]
+		if len(paths) > 0 {
+			if path := processExecutablePath(pe.ProcessID); path != "" {
+				if pathClass, pathOK := paths[cleanProcessPath(path)]; pathOK {
+					class, ok = pathClass, true
+				}
+			}
+		}
+		if ok {
+			found[pe.ProcessID] = procMeta{name: name, class: class}
 		}
 	}
 	// Child processes of the game (in-game shop / web browser such as

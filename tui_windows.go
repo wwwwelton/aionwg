@@ -148,6 +148,7 @@ type model struct {
 	logs []string
 
 	running   []string // executables seen by the last scan, while the WFP picker is open
+	managed   []ManagedProcess
 	appCursor int
 	epCursor  int // cursor of the endpoint picker
 
@@ -274,13 +275,26 @@ func (m model) moduleLines() []string {
 		if procs == "" {
 			procs = sDim.Render("nenhum processo observado")
 		}
-		return []string{
+		lines := []string{
 			row("Política", "DEFAULT · lista atual preservada"),
 			row("Regras", formatProcessRules(m.settings)),
 			row("Túnel", procs),
 			row("WFP apps", fmt.Sprintf("%d selecionados · [l] editar", len(m.settings.WFPApps))),
-			row("Ação", sDim.Render("[p] editar regras · [l] selecionar apps WFP")),
+			row("Ação", sDim.Render("[p] editar regras · [l] selecionar apps WFP · [/] filtrar")),
 		}
+		visible := filterManagedProcesses(m.managed, m.filter)
+		for _, process := range visible {
+			connections := fmt.Sprintf("%d conexões", len(process.Connections))
+			value := process.Path
+			if value == "" {
+				value = "caminho indisponível"
+			}
+			lines = append(lines, row(fmt.Sprintf("%d %s", process.PID, process.Name), string(process.Policy)+" · "+connections+" · "+value))
+		}
+		if len(visible) == 0 {
+			lines = append(lines, row("", sDim.Render("nenhum processo ativo corresponde ao filtro")))
+		}
+		return lines
 	case screenTunnels:
 		connected := sDim.Render("desconectado")
 		if m.eng != nil {
@@ -610,7 +624,11 @@ func screenForFunctionKey(key string) (uiScreen, bool) {
 func (m *model) startSearch() {
 	m.mode = modeSearch
 	m.input.SetValue(m.filter)
-	m.input.Placeholder = "filtrar configurações"
+	if m.screen == screenProcesses {
+		m.input.Placeholder = "filtrar PID, executável, caminho ou conexão"
+	} else {
+		m.input.Placeholder = "filtrar configurações"
+	}
 	m.input.Focus()
 }
 
@@ -657,6 +675,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.histPing = pushHist(m.histPing, 0)
 			}
+		}
+		if m.screen == screenProcesses {
+			m.managed = processManagerSnapshot(m.settings.ProcessRules)
 		}
 		if m.mode == modeWFPApps {
 			m.running = ListAllProcesses() // only while the picker is open
@@ -1043,18 +1064,22 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.log("Alvo de ping salvo (vale na próxima conexão)")
 		case modeSearch:
 			m.filter = v
-			if m.filter != "" {
-				for i, name := range m.configs {
-					if strings.Contains(strings.ToLower(name), strings.ToLower(m.filter)) {
-						m.cursor = i
-						break
+			if m.screen == screenProcesses {
+				m.log("Filtro de processos: %s", m.filter)
+			} else {
+				if m.filter != "" {
+					for i, name := range m.configs {
+						if strings.Contains(strings.ToLower(name), strings.ToLower(m.filter)) {
+							m.cursor = i
+							break
+						}
 					}
 				}
-			}
-			if m.filter == "" {
-				m.log("Filtro limpo")
-			} else {
-				m.log("Filtro de configurações: %s", m.filter)
+				if m.filter == "" {
+					m.log("Filtro limpo")
+				} else {
+					m.log("Filtro de configurações: %s", m.filter)
+				}
 			}
 		}
 		m.mode = modeNormal
