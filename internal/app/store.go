@@ -35,6 +35,7 @@ type Settings struct {
 	BestEndpoint     bool          `json:"best_endpoint"`           // monitor faster endpoints while connected
 	WarpMultipath    bool          `json:"warp_multipath"`          // WARP: open three extra sessions; default OFF
 	CWBSearch        bool          `json:"cwb_search"`              // measure cwb* endpoints in idle rounds and switch to the lowest ping
+	ProbeConfig      string        `json:"probe_config,omitempty"`  // name of the .conf copied to probe.conf: the free WARP account that tests endpoints for [b]
 	CustomRelays     []string      `json:"custom_relays,omitempty"` // host:port endpoints measured as configured relays
 }
 

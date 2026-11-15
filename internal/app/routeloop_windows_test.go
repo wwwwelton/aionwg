@@ -69,7 +69,7 @@ func routeFixture(t *testing.T) (e *Engine, a, b netip.AddrPort, logs func() str
 	e.epCur.Store(&[]netip.AddrPort{a})
 	e.learned = map[netip.AddrPort]bool{a: true, b: true}
 	prev := probeConfFn
-	probeConfFn = func(*WGConf, string) *WGConf { return nil } // no other profile: tests never read the user's
+	probeConfFn = func(*WGConf) *WGConf { return nil } // no other profile: tests never read the user's
 	t.Cleanup(func() { probeConfFn = prev })
 	return e, a, b, func() string { mu.Lock(); defer mu.Unlock(); return sb.String() }
 }
@@ -138,7 +138,7 @@ func TestRouteLoopDoesNotSwitchWhenTheSeparateHandshakeFails(t *testing.T) {
 	e, a, _, getLogs := routeFixture(t)
 	dead := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.3"), freeUDPPort(t)) // nothing listens
 	e.learned = map[netip.AddrPort]bool{a: true, dead: true}
-	probeConfFn = func(live *WGConf, _ string) *WGConf { return live } // stands for another identity
+	probeConfFn = func(live *WGConf) *WGConf { return live } // stands for another identity
 	defer func(ev time.Duration, p func(netip.Addr) (time.Duration, bool)) { routeEvery, legProbe = ev, p }(routeEvery, legProbe)
 	routeEvery = 100 * time.Millisecond
 	legProbe = func(x netip.Addr) (time.Duration, bool) {

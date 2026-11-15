@@ -74,6 +74,7 @@ const (
 	modeTunnelDuplicate
 	modeTunnelRename
 	modeRelay
+	modeProbeFile
 )
 
 type uiScreen int
@@ -332,7 +333,7 @@ func (m model) moduleLines() []string {
 			row("Endpoint", valueOrDash(s.Endpoint)),
 			row("Monitor", routeStatus(s)),
 			row("Rota", routeSummaryLine(s)),
-			row("Ação", sDim.Render("[b] melhor rota · [v] trocar endpoint · [t] alvo do ping")),
+			row("Ação", sDim.Render("[b] melhor rota · [B] conta de teste · [v] trocar endpoint · [t] alvo do ping")),
 		}
 		for _, candidate := range routeCandidates(s, m.settings.WarpMultipath) {
 			lines = append(lines, row(string(candidate.Kind), routeCandidateText(candidate)))
@@ -418,6 +419,7 @@ func (m model) moduleLines() []string {
 			row("WFP", fmt.Sprintf("%v", m.settings.WFP)),
 			row("Multipath", fmt.Sprintf("%v", m.settings.WarpMultipath)),
 			row("Relays próprios", strings.Join(m.settings.CustomRelays, ", ")),
+			row("Conta de teste [b]", valueOrDash(m.settings.ProbeConfig)+" · [B] escolhe o .conf da conta WARP gratuita"),
 			row("Persistência", "settings.json; chaves não exibidas"),
 		}
 	}
@@ -494,6 +496,7 @@ func (m model) commandItems() []commandItem {
 				m.log("Perfil %s válido; chaves não exibidas", name)
 			}
 		}},
+		{"Conta de teste do [b]", "B", func(m *model) { m.beginProbeInput() }},
 		{"Configurar relays", "Ctrl+L", func(m *model) {
 			m.mode = modeRelay
 			m.input.SetValue(strings.Join(m.settings.CustomRelays, ", "))
@@ -545,7 +548,7 @@ func (m model) overlayView() string {
 			"Enter/c conectar · ↑↓/jk navegar · i importar · p processos · w WFP · l apps",
 			"s sistema inteiro · n DNS · b melhor rota · v endpoint · h multipath WARP",
 			"m espelho DPS · u duplicação · r proporção · f forçar UDP · o/a ordem UDP",
-			"x autoteste · g diagnóstico · e exportar · t alvo ping · d remover · q sair",
+			"x autoteste · g diagnóstico · e exportar · t alvo ping · B conta de teste do b · d remover · q sair",
 			sDim.Render("Os atalhos legados continuam ativos; o backend mostrado é o estado real."),
 		}
 	}
@@ -919,10 +922,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.settings.BestEndpoint = !m.settings.BestEndpoint
 			_ = saveSettings(m.settings)
 			if m.settings.BestEndpoint {
-				m.log("Melhor endpoint LIGADO — procura endpoints com o programa rodando; o handshake é testado com a identidade de OUTRO perfil (sem derrubar a sessão); sem outro perfil, só testa com o jogo parado")
+				m.log("Melhor endpoint LIGADO — procura endpoints com o programa rodando; o handshake é testado com uma conta WARP gratuita separada (escolha o perfil com [B]), sem derrubar a sessão; sem conta de teste, só testa com o jogo parado")
 			} else {
 				m.log("Melhor endpoint DESLIGADO — usa o endpoint da config; [v] continua disponível para troca manual")
 			}
+		case "B":
+			m.beginProbeInput()
+			return m, nil
 		case "h":
 			m.settings.WarpMultipath = !m.settings.WarpMultipath
 			_ = saveSettings(m.settings)
@@ -1165,6 +1171,8 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				m.log("Perfil renomeado: %s → %s", source, v)
 			}
+		case modeProbeFile:
+			m.applyProbeInput(v)
 		case modeRelay:
 			relays, err := parseRelayEndpoints(v)
 			if err != nil {
@@ -1803,6 +1811,14 @@ func (m model) render(level int) string {
 		foot = sBold.Render("Proporcao UDP (X = 1:X, X:X = rajada; X 1..8): ") + m.input.View() + sDim.Render("  [Enter] ok  [Esc] cancelar")
 	case modeEndpoint:
 		foot = sBold.Render("Novo endpoint (IP ou IP:porta): ") + m.input.View() + sDim.Render("  [Enter] ok  [Esc] cancelar")
+	case modeTunnelDuplicate:
+		foot = sBold.Render("Novo nome do perfil: ") + m.input.View() + sDim.Render("  [Enter] ok  [Esc] cancelar")
+	case modeTunnelRename:
+		foot = sBold.Render("Novo nome do perfil: ") + m.input.View() + sDim.Render("  [Enter] ok  [Esc] cancelar")
+	case modeRelay:
+		foot = sBold.Render("Relays (host:porta, ...): ") + m.input.View() + sDim.Render("  [Enter] ok  [Esc] cancelar")
+	case modeProbeFile:
+		foot = sBold.Render("Conta de teste do [b] (.conf; vazio remove): ") + m.input.View() + sDim.Render("  [Enter] ok  [Esc] cancelar")
 	case modeSearch:
 		foot = sBold.Render("Filtro: ") + m.input.View() + sDim.Render("  [Enter] aplicar  [Esc] cancelar")
 	case modeDelete:
@@ -1822,7 +1838,7 @@ func (m model) render(level int) string {
 			k("F1–F10", "módulos"), k("Ctrl+K", "comandos"), k("/", "filtrar"), k("?", "ajuda"),
 			k("Enter", act), k("i", "importar"), k("↑↓", "escolher"), k("p", "processos"),
 			k("w", "WFP"), k("l", "apps WFP"),
-			k("s", "sistema inteiro"), k("n", "DNS túnel"), k("b", "melhor rota"), k("v", "trocar endpoint"), k("m", "espelho DPS"), k("u", "dup UDP"), k("r", "proporcao"), k("f", "forcar UDP"), k("o", "envio recente"), k("a", "chegada recente"), k("x", "autoteste"), k("g", "diagnóstico"), k("e", "exportar p/ WG oficial"), k("t", "alvo do ping"), k("d", "remover"), k("q", "sair"),
+			k("s", "sistema inteiro"), k("n", "DNS túnel"), k("b", "melhor rota"), k("B", "conta de teste do b"), k("v", "trocar endpoint"), k("m", "espelho DPS"), k("u", "dup UDP"), k("r", "proporcao"), k("f", "forcar UDP"), k("o", "envio recente"), k("a", "chegada recente"), k("x", "autoteste"), k("g", "diagnóstico"), k("e", "exportar p/ WG oficial"), k("t", "alvo do ping"), k("d", "remover"), k("q", "sair"),
 		}, "  "))
 	}
 

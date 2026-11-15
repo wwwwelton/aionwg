@@ -17,7 +17,7 @@ var geoResolver = netip.MustParseAddr("1.1.1.1")
 
 // scanLoop runs every discoverEvery: it keeps the exit location current and,
 // with the best-endpoint option, looks for a better endpoint. Candidates are
-// handshake-tested on a throwaway device with another saved profile's identity
+// handshake-tested on a throwaway device with the profile chosen for [b]
 // (see otherProfileConf), because a test with the live key drops the live
 // session; without such a profile, tests only run while the game is idle. With
 // the game running searches are spaced gameProbeEvery apart. Each candidate is

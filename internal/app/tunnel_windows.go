@@ -1449,6 +1449,10 @@ func (e *Engine) SetUDPNewestIn(on bool) {
 
 func (e *Engine) SetFullTunnel(on bool) { e.full.Store(on) }
 
+// probeConf is the identity for endpoint tests (the file chosen for [b]), or
+// nil when none is usable.
+func (e *Engine) probeConf() *WGConf { return probeConfFn(e.conf) }
+
 func (e *Engine) SetNoDNS(off bool) { e.noDNS.Store(off) }
 
 // SetWFP switches WFP mode. Both calls only touch atomics and a mutex-guarded
@@ -1868,7 +1872,7 @@ func (e *Engine) routeLoop() {
 		// The handshake is tested on a throwaway device with another identity,
 		// so the live session is untouched; without one, no test (the switch
 		// still waits for the live handshake and reverts on failure).
-		if altConf := probeConfFn(e.conf, e.profile); altConf != nil && !probeHandshake(altConf, altConf.Peers[0], alt, 2*time.Second) {
+		if altConf := e.probeConf(); altConf != nil && !probeHandshake(altConf, altConf.Peers[0], alt, 2*time.Second) {
 			_ = saveBad(routesPath(), e.profile, alt, time.Now())
 			e.routeLog("rota: %s falhou no handshake de teste (sessão separada); descartado por 7 dias", alt)
 			next = time.Now().Add(routeSettle)
@@ -2087,8 +2091,8 @@ func pingMs(p PingResult) int {
 }
 
 // discoverEndpoints looks for an endpoint faster than the current one. The
-// handshake is tested on a throwaway device, with another profile's identity
-// when one exists (otherwise only while the game is idle). With no game traffic a successful candidate is switched to at once;
+// handshake is tested on a throwaway device, with the chosen profile's identity
+// when one is chosen (otherwise only while the game is idle). With no game traffic a successful candidate is switched to at once;
 // while the game runs it is only learned, and routeLoop trials it by game ping.
 // It tries at most one candidate per call and remembers the result.
 func (e *Engine) discoverEndpoints() {
@@ -2098,7 +2102,7 @@ func (e *Engine) discoverEndpoints() {
 	}
 	// A handshake with the live key kills the live session, so with the game
 	// running only another identity may test endpoints.
-	alt := probeConfFn(e.conf, e.profile)
+	alt := e.probeConf()
 	if alt == nil && e.gameServer().IsValid() {
 		return
 	}
