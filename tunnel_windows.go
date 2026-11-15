@@ -33,7 +33,10 @@ import (
 	"time"
 	"unsafe"
 
+	"aionwg/internal/telemetry"
+
 	"golang.org/x/sys/windows"
+
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 )
@@ -107,6 +110,7 @@ type Diag struct {
 type PingResult struct {
 	Target string
 	RTT    time.Duration // 0 = no reply
+	Jitter time.Duration // mean absolute change between successful samples
 	OK     bool
 	Loss   float64 // 0..1 over the last 20 probes
 	Err    uint32  // Windows IP_STATUS / GetLastError of the last failed direct ICMP (0 = none)
@@ -152,6 +156,7 @@ type Stats struct {
 	NativeWFP              NativeWFPStatus
 	DNSTunnel              bool // DNS redirect active
 	Diag                   Diag
+	Telemetry              telemetry.Snapshot
 	Endpoint               string
 	TunnelAddr             string
 	Route                  RouteTrace // latest traceroute of the route in use
@@ -170,6 +175,7 @@ type Stats struct {
 	TunnelReachable        bool
 	DestinationReachable   bool
 }
+
 type outboundUDPJob struct {
 	packet  []byte // original routed packet, already SNAT'd for WireGuard
 	copyUDP []byte // optional copy of packet for the secondary (duplicate) send
@@ -182,35 +188,36 @@ type Engine struct {
 	epCur     atomic.Pointer[[]netip.AddrPort]
 	// primaryHold is set while the primary endpoint is being switched: new flows
 	// and duplicates use the extra UDP paths instead.
-	primaryHold  atomic.Bool
-	epMu         sync.Mutex // serialises runtime endpoint switches
-	dev          *device.Device
-	tun          *splitTun
-	h            divertHandle
-	owner        *ownerTracker
-	mirror       *mirror
-	shugoMu      sync.Mutex
-	shugo        *shugoCompat  // Shugo.gg relay view; exists only while [m] is on
-	shugoOld     chan struct{} // done of the last supervisor being stopped in the background
-	udpDup       *udpDuplicator[uint8]
-	paths        [maxPaths - 1]*udpPath
-	dupPath      atomic.Uint64
-	udpForce     atomic.Bool
-	latestOut    atomic.Bool
-	latestIn     atomic.Bool
-	outboundQ    *latestQueue[outboundUDPJob]
-	inboundQ     *latestQueue[[]byte]
-	meterMu      sync.Mutex
-	meter        *meterAdapter // Wintun copy for Npcap-based DPS meters
-	meterErr     string
-	meterDup     meterDedup                    // one copy of each inbound reply to the meter; the game gets all
-	meterOpening bool                          // protected by meterMu; never initialize Wintun on the TUI goroutine
-	meterOpener  func() (*meterAdapter, error) // injectable for regression tests
-	addr4        netip.Addr
-	addr6        netip.Addr
-	maxMSS4      uint16
-	maxMSS6      uint16
-	logf         func(string, ...any)
+	primaryHold      atomic.Bool
+	epMu             sync.Mutex // serialises runtime endpoint switches
+	dev              *device.Device
+	tun              *splitTun
+	h                divertHandle
+	owner            *ownerTracker
+	mirror           *mirror
+	shugoMu          sync.Mutex
+	shugo            *shugoCompat  // Shugo.gg relay view; exists only while [m] is on
+	shugoOld         chan struct{} // done of the last supervisor being stopped in the background
+	udpDup           *udpDuplicator[uint8]
+	paths            [maxPaths - 1]*udpPath
+	dupPath          atomic.Uint64
+	udpForce         atomic.Bool
+	latestOut        atomic.Bool
+	latestIn         atomic.Bool
+	outboundQ        *latestQueue[outboundUDPJob]
+	inboundQ         *latestQueue[[]byte]
+	meterMu          sync.Mutex
+	meter            *meterAdapter // Wintun copy for Npcap-based DPS meters
+	meterErr         string
+	meterDup         meterDedup                    // one copy of each inbound reply to the meter; the game gets all
+	meterOpening     bool                          // protected by meterMu; never initialize Wintun on the TUI goroutine
+	meterOpener      func() (*meterAdapter, error) // injectable for regression tests
+	addr4            netip.Addr
+	addr6            netip.Addr
+	maxMSS4          uint16
+	maxMSS6          uint16
+	logf             func(string, ...any)
+	telemetrySampler telemetry.Sampler
 
 	natMu sync.Mutex
 	nat   map[portKey]*natEntry
@@ -272,7 +279,7 @@ type pingState struct {
 }
 
 func (s *pingState) result() PingResult {
-	r := PingResult{RTT: s.last, OK: s.ok, Err: s.err}
+	r := PingResult{RTT: s.last, Jitter: rttJitter(s.rtts), OK: s.ok, Err: s.err}
 	if s.target.IsValid() {
 		r.Target = s.target.String()
 	}
@@ -1114,6 +1121,7 @@ func (e *Engine) Stats() Stats {
 		WGRx:                   e.wgRxBytes.Load(),
 		WGTx:                   e.wgTxBytes.Load(),
 		FullTunnel:             e.full.Load(),
+		Telemetry:              e.telemetrySampler.Sample(),
 		Procs:                  e.owner.Processes(),
 		Endpoint:               e.eps()[0].String(),
 		DriverLoaded:           e.h != 0,

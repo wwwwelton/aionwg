@@ -366,6 +366,8 @@ func (m model) moduleLines() []string {
 		d := s.Diag
 		return []string{
 			row("Backend", m.backendLabel()),
+			row("Recursos", telemetrySummary(s)),
+			row("Fluxos", fmt.Sprintf("%d ativos · %d jogo", s.Flows, s.GameFlows)),
 			row("Capturados", fmt.Sprintf("%d", d.Captured)),
 			row("Reinjetados", fmt.Sprintf("%d", d.Injected)),
 			row("Erros", fmt.Sprintf("injeção %d · sem NAT %d · filas %d", d.InjectErr, d.InNoNAT, d.TunDrop)),
@@ -1122,7 +1124,19 @@ func fmtPing(p PingResult) string {
 	if p.Loss > 0 {
 		s += lipgloss.NewStyle().Foreground(cRed).Render(fmt.Sprintf("  perda %.0f%%", p.Loss*100))
 	}
+	if p.Jitter > 0 {
+		s += sDim.Render(fmt.Sprintf("  jitter %v", p.Jitter.Round(time.Millisecond)))
+	}
+
 	return s
+}
+func telemetrySummary(s Stats) string {
+	cpu := "N/A"
+	if s.Telemetry.CPUAvailable {
+		cpu = fmt.Sprintf("%.1f%%", s.Telemetry.CPUPercent)
+	}
+	return fmt.Sprintf("CPU %s · memória %s · goroutines %d",
+		cpu, fmtBytes(s.Telemetry.MemoryBytes), s.Telemetry.Goroutines)
 }
 
 // sparkline draws h as solid bars (█) colored by value; zero samples are a
