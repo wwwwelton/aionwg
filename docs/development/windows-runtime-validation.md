@@ -18,5 +18,5 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./...
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' ./cmd/aionwg
 ```
 
-- The current log showed real process traffic (`fluxos=2`), direct RTT around 20–25 ms and no injection errors, but `handshake=nunca`; the tunnel was not yet connected.
+- Manual TUI interaction connected `wgcf-profile -astra.conf`; the current log showed real process traffic (`fluxos=3`), direct RTT around 24 ms and no injection errors, but `handshake=nunca`; the tunnel is not proven healthy.
 - Still not validated: importing and connecting the supplied WARP profile, a successful WireGuard handshake, native WFP filter installation under a selected process, Wintun packet traffic, loss/jitter under load and real game traffic. Continue manually in the running TUI with `[i]`, `Enter`, diagnostics `[g]` and `[q]` only after the test.
