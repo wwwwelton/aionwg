@@ -256,7 +256,8 @@ type Engine struct {
 	gwTarget        netip.Addr
 	profile         string // profile file name: key of the persisted routes
 	lrMu            sync.Mutex
-	learned         map[netip.AddrPort]bool // endpoints proven by a handshake (route monitor)
+	probeSkip       map[netip.AddrPort]time.Time // endpoints that failed the isolated test, until when
+	learned         map[netip.AddrPort]bool      // endpoints proven by a handshake (route monitor)
 	routeMon        bool
 	relayMu         sync.RWMutex
 	relayCandidates []RouteCandidate
@@ -1783,28 +1784,42 @@ func (e *Engine) learn(ep netip.AddrPort) {
 	}
 }
 
-// forget drops ep from the learned endpoints (this session and the saved
-// profile routes) and skips it for badTTL.
-func (e *Engine) forget(ep netip.AddrPort) {
+// skipTemporarily keeps ep out of route trials for probeRetryAfter (in memory
+// only: nothing is forgotten or saved).
+func (e *Engine) skipTemporarily(ep netip.AddrPort) {
 	e.lrMu.Lock()
-	delete(e.learned, ep)
-	e.lrMu.Unlock()
-	if e.profile != "" {
-		_ = removeRoute(routesPath(), e.profile, ep)
-		_ = saveBad(routesPath(), e.profile, ep, time.Now())
+	defer e.lrMu.Unlock()
+	if e.probeSkip == nil {
+		e.probeSkip = map[netip.AddrPort]time.Time{}
 	}
+	e.probeSkip[ep] = time.Now().Add(probeRetryAfter)
+}
+
+// skipped reports whether ep is still inside its temporary skip.
+func (e *Engine) skipped(ep netip.AddrPort) bool {
+	e.lrMu.Lock()
+	defer e.lrMu.Unlock()
+	until, ok := e.probeSkip[ep]
+	if ok && !time.Now().Before(until) {
+		delete(e.probeSkip, ep)
+		return false
+	}
+	return ok
 }
 
 // rejectByProbe handshake-tests ep with the identity chosen for [b] (never the
-// live key) and, when the test fails, forgets the endpoint. It reports whether
-// ep must not be used; with no chosen identity nothing is tested.
+// live key). A failed test only skips ep for probeRetryAfter. It reports whether
+// ep must not be used now; with no chosen identity nothing is tested.
 func (e *Engine) rejectByProbe(ep netip.AddrPort) bool {
+	if e.skipped(ep) {
+		return true
+	}
 	alt := e.probeConf()
 	if alt == nil || probeHandshake(alt, alt.Peers[0], ep, 2*time.Second) {
 		return false
 	}
-	e.forget(ep)
-	e.routeLog("rota: %s falhou no handshake de teste (conta separada); descartado por 7 dias", ep)
+	e.skipTemporarily(ep)
+	e.routeLog("rota: %s falhou no handshake de teste (conta separada); ignorado por %v", ep, probeRetryAfter)
 	return true
 }
 
@@ -1883,7 +1898,7 @@ func (e *Engine) routeLoop() {
 		}
 		legs := map[netip.AddrPort]time.Duration{}
 		for _, a := range e.learnedList() {
-			if a == cur || e.pathEndpointUsed(a) {
+			if a == cur || e.pathEndpointUsed(a) || e.skipped(a) {
 				continue
 			}
 			if leg, ok := legProbe(a.Addr()); ok {
@@ -2135,6 +2150,11 @@ func (e *Engine) discoverEndpoints() {
 	for _, l := range e.learnedList() {
 		skip[l.Addr()] = true
 	}
+	e.lrMu.Lock()
+	for ep := range e.probeSkip {
+		skip[ep.Addr()] = true
+	}
+	e.lrMu.Unlock()
 	for _, path := range e.paths {
 		if path != nil {
 			skip[path.currentEndpoint().Addr()] = true
@@ -2178,6 +2198,11 @@ func (e *Engine) discoverEndpoints() {
 			return
 		}
 		e.routeLog("rota: novo endpoint aprendido %s (perna direta %v contra %v); handshake de teste ok, troca só se houver ganho e sem jogo em andamento", r.Addr(), r.RTT, curRTT)
+		return
+	}
+	if alt != nil { // tested with another account: only a short pause, never a blacklist
+		e.skipTemporarily(r.AddrPort)
+		e.routeLog("rota: %s (%v) respondeu a ICMP mas não ao WireGuard (conta separada); ignorado por %v", r.Addr(), r.RTT, probeRetryAfter)
 		return
 	}
 	_ = saveBad(routesPath(), e.profile, r.AddrPort, time.Now())

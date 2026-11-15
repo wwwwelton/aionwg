@@ -176,15 +176,27 @@ func TestRouteLoopDoesNotSwitchWhenTheSeparateHandshakeFails(t *testing.T) {
 	if got := e.eps()[0]; got != a {
 		t.Fatalf("live endpoint changed to %v:\n%s", got, getLogs())
 	}
-	if e.learned[dead] {
-		t.Fatal("an endpoint that failed the isolated test must be forgotten")
+	if !e.learned[dead] {
+		t.Fatal("a failed isolated test must not forget the endpoint")
 	}
+	if !e.skipped(dead) {
+		t.Fatal("the failed endpoint must be skipped for a short while")
+	}
+	if loadBad(routesPath(), e.profile, time.Now())[dead.Addr()] {
+		t.Fatal("a failed isolated test must not blacklist the endpoint")
+	}
+	found := false
 	for _, ep := range loadRoutes(routesPath(), e.profile) {
-		if ep == dead {
-			t.Fatal("the failed endpoint must be removed from the saved routes")
-		}
+		found = found || ep == dead
 	}
-	if !loadBad(routesPath(), e.profile, time.Now())[dead.Addr()] {
-		t.Fatal("the failed endpoint must be marked bad")
+	if !found {
+		t.Fatal("the saved routes must keep the endpoint")
+	}
+	defer func(d time.Duration) { probeRetryAfter = d }(probeRetryAfter)
+	probeRetryAfter = 30 * time.Millisecond
+	e.skipTemporarily(dead)
+	time.Sleep(60 * time.Millisecond)
+	if e.skipped(dead) {
+		t.Fatal("the skip must expire")
 	}
 }

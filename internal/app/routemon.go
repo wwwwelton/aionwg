@@ -29,12 +29,13 @@ const (
 
 // Timing is a variable only so tests can shrink it.
 var (
-	routeEvery     = 30 * time.Second
-	routeSettle    = 12 * time.Second // game pings collected through the new path
-	routeCooldown  = 3 * time.Minute  // after a kept switch
-	failCooldown   = 10 * time.Minute // after a failed or reverted one
-	discoverEvery  = 10 * time.Second // endpoint search period; each candidate is handshake-probed once on a separate session
-	gameProbeEvery = time.Minute      // minimum spacing between searches while the game runs
+	routeEvery      = 30 * time.Second
+	routeSettle     = 12 * time.Second // game pings collected through the new path
+	routeCooldown   = 3 * time.Minute  // after a kept switch
+	failCooldown    = 10 * time.Minute // after a failed or reverted one
+	probeRetryAfter = time.Minute      // an endpoint that failed the isolated test is skipped this long
+	discoverEvery   = 10 * time.Second // endpoint search period; each candidate is handshake-probed once on a separate session
+	gameProbeEvery  = time.Minute      // minimum spacing between searches while the game runs
 )
 
 // pickRoute returns the endpoint whose direct leg beats curLeg by routeMargin,
@@ -143,23 +144,6 @@ func saveRoute(path, profile string, ep netip.AddrPort) error {
 			}
 		}
 		m[profile] = append(m[profile], ep.String())
-		return true
-	})
-}
-
-// removeRoute forgets ep for profile (the endpoint failed an isolated test).
-func removeRoute(path, profile string, ep netip.AddrPort) error {
-	return mutateRoutes(path, func(m map[string][]string) bool {
-		var keep []string
-		for _, s := range m[profile] {
-			if s != ep.String() {
-				keep = append(keep, s)
-			}
-		}
-		if len(keep) == len(m[profile]) {
-			return false
-		}
-		m[profile] = keep
 		return true
 	})
 }
