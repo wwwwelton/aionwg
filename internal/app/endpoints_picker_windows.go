@@ -15,7 +15,7 @@ func (m model) endpointPickRows() []endpointRow {
 	if m.eng == nil {
 		return nil
 	}
-	return m.eng.endpointRows()
+	return m.eng.EndpointRows()
 }
 
 // endpointPickStart puts the cursor on the endpoint in use.
@@ -60,7 +60,7 @@ func (m model) endpointPicker(w int) string {
 		lines = append(lines, "  "+sDim.Render(other))
 	}
 	if m.eng != nil {
-		if cands := m.eng.endpointCandidates(rows); len(cands) > 0 {
+		if cands := m.eng.EndpointCandidates(rows); len(cands) > 0 {
 			lines = append(lines, "", sDim.Render(fmt.Sprintf("sendo buscados (%d, ainda sem handshake):", len(cands))))
 			for _, ep := range cands {
 				lines = append(lines, sDim.Render("    "+ep.String()))

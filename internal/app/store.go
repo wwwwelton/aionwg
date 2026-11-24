@@ -160,37 +160,102 @@ func saveSettings(s Settings) error {
 	return os.Rename(tmp, filepath.Join(appDir(), "settings.json"))
 }
 
+type ConfigType string
+
+const (
+	ConfigTypeWireGuard ConfigType = "wireguard"
+	ConfigTypePingless  ConfigType = "pingless"
+)
+
+type ConfigMeta struct {
+	Type ConfigType `json:"type"`
+}
+
+func metaPath(name string) string {
+	return filepath.Join(configDir(), name+".meta.json")
+}
+
+func DetectConfigType(name string) ConfigType {
+	if b, err := os.ReadFile(metaPath(name)); err == nil {
+		var m ConfigMeta
+		if err := json.Unmarshal(b, &m); err == nil && m.Type != "" {
+			return m.Type
+		}
+	}
+	if strings.HasSuffix(strings.ToLower(name), ".toml") {
+		return ConfigTypePingless
+	}
+	b, err := os.ReadFile(filepath.Join(configDir(), name))
+	if err == nil {
+		text := string(b)
+		if IsPinglessConfig(text) {
+			return ConfigTypePingless
+		}
+	}
+	return ConfigTypeWireGuard
+}
+
+func saveConfigMeta(name string, t ConfigType) {
+	m := ConfigMeta{Type: t}
+	b, _ := json.Marshal(m)
+	_ = os.WriteFile(metaPath(name), b, 0o600)
+}
+
 func listConfigs() []string {
 	ents, _ := os.ReadDir(configDir())
 	var out []string
 	for _, e := range ents {
-		if !e.IsDir() && strings.EqualFold(filepath.Ext(e.Name()), ".conf") {
-			out = append(out, e.Name())
+		if !e.IsDir() {
+			ext := strings.ToLower(filepath.Ext(e.Name()))
+			if (ext == ".conf" || ext == ".toml") && !strings.HasSuffix(e.Name(), ".meta.json") {
+				out = append(out, e.Name())
+			}
 		}
 	}
 	sort.Strings(out)
 	return out
 }
 
-// importConfig validates and copies a .conf into the app folder.
-func importConfig(path string) (string, error) {
+// importConfig validates and copies a config into the app folder.
+func importConfig(path string, forcedType ...ConfigType) (string, error) {
 	path = strings.Trim(strings.TrimSpace(path), "\"'& ")
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
-	if _, err := ParseConfig(string(b)); err != nil {
-		return "", fmt.Errorf("config inválida: %w", err)
+	text := string(b)
+	targetType := ConfigTypeWireGuard
+	if len(forcedType) > 0 && forcedType[0] != "" {
+		targetType = forcedType[0]
+	} else if IsPinglessConfig(text) || strings.HasSuffix(strings.ToLower(path), ".toml") {
+		targetType = ConfigTypePingless
 	}
+
+	if targetType == ConfigTypePingless {
+		if _, err := ParsePinglessConfig(text); err != nil {
+			return "", fmt.Errorf("config Pingless inválida: %w", err)
+		}
+	} else {
+		if _, err := ParseConfig(text); err != nil {
+			return "", fmt.Errorf("config WireGuard inválida: %w", err)
+		}
+	}
+
 	if err := os.MkdirAll(configDir(), 0o700); err != nil {
 		return "", err
 	}
 	name := filepath.Base(path)
-	if !strings.EqualFold(filepath.Ext(name), ".conf") {
-		name += ".conf"
+	ext := filepath.Ext(name)
+	if targetType == ConfigTypePingless {
+		if !strings.EqualFold(ext, ".toml") && !strings.EqualFold(ext, ".conf") {
+			name += ".toml"
+		}
+	} else {
+		if !strings.EqualFold(ext, ".conf") {
+			name += ".conf"
+		}
 	}
-	// O_EXCL: never overwrite a profile (and its private key) with another file
-	// of the same name; the check and the create are one atomic step.
+
 	f, err := os.OpenFile(filepath.Join(configDir(), name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if errors.Is(err, fs.ErrExist) {
 		return "", fmt.Errorf("já existe uma config chamada %s; remova-a ([d]) ou renomeie o arquivo", name)
@@ -207,6 +272,7 @@ func importConfig(path string) (string, error) {
 		os.Remove(f.Name())
 		return "", err
 	}
+	saveConfigMeta(name, targetType)
 	return name, nil
 }
 
@@ -216,6 +282,14 @@ func readConfig(name string) (*WGConf, error) {
 		return nil, err
 	}
 	return ParseConfig(string(b))
+}
+
+func readPinglessConfig(name string) (*PinglessConfig, error) {
+	b, err := os.ReadFile(filepath.Join(configDir(), name))
+	if err != nil {
+		return nil, err
+	}
+	return ParsePinglessConfig(string(b))
 }
 
 // exportOfficial writes configs for the official WireGuard client next to
@@ -249,4 +323,7 @@ func exportOfficial(name string, observed, endpoints []netip.Addr) (string, int,
 	return dir, len(observed), nil
 }
 
-func deleteConfig(name string) error { return os.Remove(filepath.Join(configDir(), name)) }
+func deleteConfig(name string) error {
+	_ = os.Remove(metaPath(name))
+	return os.Remove(filepath.Join(configDir(), name))
+}

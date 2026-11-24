@@ -62,6 +62,7 @@ type mode int
 
 const (
 	modeNormal mode = iota
+	modeImportChoose
 	modeImport
 	modeProcs
 	modePing
@@ -111,7 +112,7 @@ type (
 	animMsg      struct{}
 	logMsg       string
 	connectedMsg struct {
-		eng  *Engine
+		eng  TunnelEngine
 		name string
 		err  error
 	}
@@ -125,13 +126,14 @@ type model struct {
 	configs    []string
 	cursor     int
 	mode       mode
+	importType ConfigType
 	input      textinput.Model
 	screen     uiScreen
 	previous   uiScreen
 	overlay    uiOverlay
 	palette    int
 	filter     string
-	eng        *Engine
+	eng        TunnelEngine
 	engName    string
 	connecting bool
 	since      time.Time
@@ -582,7 +584,28 @@ func animTick() tea.Cmd {
 
 func (m model) Init() tea.Cmd { return tea.Batch(tick(), animTick(), textinput.Blink) }
 
-func startEngine(name string, s Settings) (*Engine, error) {
+func startEngine(name string, s Settings) (TunnelEngine, error) {
+	cType := DetectConfigType(name)
+	if cType == ConfigTypePingless {
+		pCfg, err := readPinglessConfig(name)
+		if err != nil {
+			return nil, err
+		}
+		return StartPinglessEngine(pCfg, EngineOptions{
+			Processes: s.Processes, ProcessRules: s.ProcessRules, PingTarget: s.PingTarget, Mirror: s.Mirror,
+			MirrorNoLoopback: s.MirrorNoLoopback,
+			UDPDuplicate:     s.UDPDuplicate, UDPOriginals: s.UDPOriginals, UDPCopies: s.UDPCopies, UDPForce: s.UDPForce,
+			UDPNewestOut: s.UDPNewestOut, UDPNewestIn: s.UDPNewestIn,
+			FullTunnel: s.FullTunnel, NoDNS: s.NoDNS,
+			WFP: s.WFP, WFPApps: s.WFPApps, BestEndpoint: s.BestEndpoint, WarpMultipath: s.WarpMultipath, CWBSearch: s.CWBSearch, CustomRelays: s.CustomRelays,
+			ConfigPath: filepath.Join(configDir(), name),
+		}, func(f string, a ...any) {
+			line := fmt.Sprintf(f, a...)
+			diskLog.Printf("%s", line)
+			queueProgramLog(logMsg(line))
+		})
+	}
+
 	conf, err := readConfig(name)
 	if err != nil {
 		return nil, err
@@ -872,10 +895,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.log("Conectando com %s…", name)
 			return m, connectCmd(name, m.settings)
 		case "i":
-			m.mode = modeImport
-			m.input.SetValue("")
-			m.input.Placeholder = `C:\Users\voce\Downloads\vps.conf  (pode arrastar o arquivo para cá)`
-			m.input.Focus()
+			m.mode = modeImportChoose
 		case "p":
 			m.mode = modeProcs
 			m.input.SetValue(formatProcessRules(m.settings))
@@ -1067,6 +1087,29 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.mode == modeWFPApps {
 		return m.updatePicker(msg)
 	}
+	if m.mode == modeImportChoose {
+		switch msg.String() {
+		case "1", "w", "W":
+			m.importType = ConfigTypeWireGuard
+			m.mode = modeImport
+			m.input.SetValue("")
+			m.input.Placeholder = `C:\caminho\client.conf (WireGuard .conf)`
+			m.input.Focus()
+			return m, nil
+		case "2", "p", "P":
+			m.importType = ConfigTypePingless
+			m.mode = modeImport
+			m.input.SetValue("")
+			m.input.Placeholder = `C:\caminho\pingless.toml (Pingless relay .toml/.conf)`
+			m.input.Focus()
+			return m, nil
+		case "esc", "q":
+			m.mode = modeNormal
+			return m, nil
+		}
+		return m, nil
+	}
+
 	if m.mode == modeEndpointPick {
 		return m.updateEndpointPick(msg)
 	}
@@ -1095,11 +1138,15 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		v := strings.TrimSpace(m.input.Value())
 		switch m.mode {
 		case modeImport:
-			name, err := importConfig(v)
+			name, err := importConfig(v, m.importType)
 			if err != nil {
 				m.log("ERRO ao importar: %v", err)
 			} else {
-				m.log("Config importada: %s", name)
+				typeName := "WireGuard"
+				if DetectConfigType(name) == ConfigTypePingless {
+					typeName = "Pingless Relay"
+				}
+				m.log("Config %s importada (%s): %s", typeName, name, v)
 				m.configs = listConfigs()
 				for i, c := range m.configs {
 					if c == name {
@@ -1708,10 +1755,15 @@ func (m model) render(level int) string {
 			continue // connected and short of room: only the selected config
 		}
 		mark := "  "
-		line := c
+		cType := DetectConfigType(c)
+		typeTag := lipgloss.NewStyle().Foreground(cAccent).Render("[WireGuard]")
+		if cType == ConfigTypePingless {
+			typeTag = lipgloss.NewStyle().Foreground(cYellow).Render("[Pingless]")
+		}
+		line := typeTag + " " + c
 		if i == m.cursor {
 			mark = sSel.Render("▸ ")
-			line = sSel.Render(c)
+			line = typeTag + " " + sSel.Render(c)
 		}
 		if m.eng != nil && c == m.engName {
 			line += lipgloss.NewStyle().Foreground(cGreen).Render("  ● em uso")
@@ -1801,8 +1853,17 @@ func (m model) render(level int) string {
 	// footer / prompt, built first so the log is sized with its real height
 	var foot string
 	switch m.mode {
+	case modeImportChoose:
+		foot = sBold.Render("Importar qual tipo de servidor?") + "  " +
+			sKey.Render("[1/w]") + " " + sBold.Render("WireGuard (.conf)") + "   " +
+			sKey.Render("[2/p]") + " " + sBold.Render("Pingless Relay (.toml/.conf)") + "   " +
+			sDim.Render("[Esc] cancelar")
 	case modeImport:
-		foot = sBold.Render("Caminho do .conf: ") + m.input.View() + sDim.Render("  [Enter] ok  [Esc] cancelar")
+		lbl := "Caminho do WireGuard .conf: "
+		if m.importType == ConfigTypePingless {
+			lbl = "Caminho do Pingless Relay .toml/.conf: "
+		}
+		foot = sBold.Render(lbl) + m.input.View() + sDim.Render("  [Enter] ok  [Esc] cancelar")
 	case modeProcs:
 		foot = sBold.Render("Regras (nome ou nome=POLICY): ") + m.input.View() + sDim.Render("  TUNNEL/BYPASS/BLOCK/DEFAULT")
 	case modePing:

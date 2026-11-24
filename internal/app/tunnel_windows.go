@@ -1532,6 +1532,12 @@ func (e *Engine) SetEndpointString(v string) error {
 // SetEndpoint switches the first peer's endpoint in memory: the profile file
 // is never written and the next connection uses the profile again. A switch
 // that does not complete a handshake is undone.
+func (e *Engine) WGConf() *WGConf                          { return e.conf }
+func (e *Engine) EndpointRows() []endpointRow              { return e.endpointRows() }
+func (e *Engine) EndpointCandidates(existingRows []endpointRow) []netip.AddrPort {
+	return e.endpointCandidates(existingRows)
+}
+
 func (e *Engine) SetEndpoint(ep netip.AddrPort) error {
 	e.epMu.Lock()
 	defer e.epMu.Unlock()

@@ -87,7 +87,7 @@ func setProbeConfig(path string, live *WGConf) (string, error) {
 // liveConf is the profile in use, or the last one used when disconnected.
 func (m *model) liveConf() *WGConf {
 	if m.eng != nil {
-		return m.eng.conf
+		return m.eng.WGConf()
 	}
 	if c, err := readConfig(m.settings.LastConfig); err == nil {
 		return c
